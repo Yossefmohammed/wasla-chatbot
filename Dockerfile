@@ -40,7 +40,8 @@ RUN pip install --no-cache-dir \
     bitsandbytes \
     sentence-transformers \
     chromadb \
-    langchain==0.0.166 \
+    langchain==0.0.305 \
+    langchain-community==0.0.20 \
     pypdf \
     python-dotenv
 
