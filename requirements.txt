@@ -1,10 +1,10 @@
 streamlit
-torch
-transformers
-accelerate
 langchain==0.0.305
 langchain-community==0.0.20
+langchain-core==0.1.23
+langchain-groq
 sentence-transformers
 chromadb
 pypdf
+pandas
 python-dotenv
