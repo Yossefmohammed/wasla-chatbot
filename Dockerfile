@@ -40,8 +40,9 @@ RUN pip install --no-cache-dir \
     bitsandbytes \
     sentence-transformers \
     chromadb \
-    langchain \
-    langchain-community
+    langchain==0.0.166 \
+    pypdf \
+    python-dotenv
 
 # =========================
 # 5. Copy your app
