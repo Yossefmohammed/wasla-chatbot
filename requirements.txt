@@ -2,8 +2,8 @@ streamlit
 torch
 transformers
 accelerate
-langchain
-langchain-community
+langchain==0.1.148
+langchain-community==0.1.25
 sentence-transformers
 chromadb
 pypdf
