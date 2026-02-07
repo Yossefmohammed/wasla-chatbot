@@ -74,11 +74,14 @@ def set_dark_theme():
 @st.cache_resource()
 def load_llm():
     hf_token = os.getenv("HF_TOKEN")
+    # If you want to force the small fallback model even when HF_TOKEN is present,
+    # set the environment variable `FORCE_FALLBACK=1` or `USE_SMALL_MODEL=1`.
+    force_fallback = os.getenv("FORCE_FALLBACK", os.getenv("USE_SMALL_MODEL", "")).lower() in ("1", "true", "yes")
 
     # If no HF token is provided, avoid attempting to download/stream the
     # large Llama-2 model which will likely OOM on Render. Use a small
     # fallback model locally and show a clear warning to the user.
-    if not hf_token:
+    if not hf_token or force_fallback:
         try:
             fallback = "distilgpt2"
             st.warning(
@@ -173,6 +176,9 @@ def save_to_csv(question, answer):
 # Custom QA Function
 # ===============================
 def custom_qa(question, llm):
+    if llm is None:
+        return "Error: LLM model failed to load. Please check your HF_TOKEN.", []
+    
     embeddings = SentenceTransformerEmbeddings(
         model_name="sentence-transformers/all-mpnet-base-v2",
         model_kwargs={"device": "cpu"}
