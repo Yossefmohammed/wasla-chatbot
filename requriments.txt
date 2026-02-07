@@ -1,0 +1,14 @@
+streamlit
+langchain
+langchain-community
+langchain-text-splitters
+chromadb
+pypdf
+sentence-transformers
+torch
+transformers
+accelerate
+llama-cpp-python
+python-dotenv
+pandas
+numpy
