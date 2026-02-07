@@ -1,32 +1,43 @@
 import streamlit as st
+import os
+import csv
+
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
-from langchain_community.llms import HuggingFacePipeline
-from transformers import BitsAndBytesConfig, pipeline, AutoTokenizer, AutoModelForCausalLM
-from chromadb.config import Settings
-import torch
-import os
-import csv
+from langchain_groq import ChatGroq
 
-# Import your constants from constant.py
 from constant import CHROMA_SETTINGS
 
 # ===============================
-# Custom Prompt Template
+# Page Config
+# ===============================
+st.set_page_config(
+    page_title="Wasla Solutions",
+    layout="wide"
+)
+
+# ===============================
+# Custom Prompt
 # ===============================
 WASLA_PROMPT = PromptTemplate(
-    template="""Context: {context}
+    template="""
+You are an assistant answering questions based ONLY on the provided context.
 
-Question: {question}
+Context:
+{context}
 
-Answer:""",
+Question:
+{question}
+
+Answer in a clear, concise, and factual way:
+""",
     input_variables=["context", "question"]
 )
 
 # ===============================
-# Dark Theme + Center Layout
+# Dark Theme
 # ===============================
 def set_dark_theme():
     st.markdown(
@@ -36,136 +47,80 @@ def set_dark_theme():
             background-color: #0B1020;
             color: #EAEAF2;
         }
-
         section.main > div {
             max-width: 900px;
             margin: auto;
         }
-
         h1 {
             text-align: center;
             font-size: 42px;
             font-weight: 700;
             color: #FFFFFF;
         }
-
         textarea {
             background-color: #111827;
             color: #E5E7EB;
             border-radius: 10px;
         }
-
         button {
             background-color: #2563EB !important;
             color: white !important;
             border-radius: 10px;
             width: 100%;
         }
-
         footer {visibility: hidden;}
         </style>
         """,
         unsafe_allow_html=True
     )
 
+set_dark_theme()
+
 # ===============================
-# Load LLaMA 2 Model
+# Load Vector DB (CACHED)
 # ===============================
-@st.cache_resource()
+@st.cache_resource
+def load_vectorstore():
+    embeddings = SentenceTransformerEmbeddings(
+        model_name="sentence-transformers/all-mpnet-base-v2"
+    )
+
+    db = Chroma(
+        persist_directory=CHROMA_SETTINGS.persist_directory,
+        embedding_function=embeddings
+    )
+    return db
+
+# ===============================
+# Load LLM (Groq – CACHED)
+# ===============================
+@st.cache_resource
 def load_llm():
-    hf_token = os.getenv("HF_TOKEN")
-    # If you want to force the small fallback model even when HF_TOKEN is present,
-    # set the environment variable `FORCE_FALLBACK=1` or `USE_SMALL_MODEL=1`.
-    force_fallback = os.getenv("FORCE_FALLBACK", os.getenv("USE_SMALL_MODEL", "")).lower() in ("1", "true", "yes")
-
-    # If no HF token is provided, avoid attempting to download/stream the
-    # large Llama-2 model which will likely OOM on Render. Use a small
-    # fallback model locally and show a clear warning to the user.
-    if not hf_token or force_fallback:
-        try:
-            fallback = "distilgpt2"
-            st.warning(
-                "HF_TOKEN not set — using small fallback model (distilgpt2). "
-                "Set HF_TOKEN in Render environment to load Llama-2.")
-            tokenizer = AutoTokenizer.from_pretrained(fallback)
-            model = AutoModelForCausalLM.from_pretrained(fallback)
-            gen_pipeline = pipeline(
-                "text-generation",
-                model=model,
-                tokenizer=tokenizer,
-                max_new_tokens=200,
-            )
-            return HuggingFacePipeline(pipeline=gen_pipeline)
-        except Exception as e:
-            st.error(f"Failed to load fallback model: {e}")
-            return None
-
-    # Preferred path: use the authenticated Llama-2 model when HF_TOKEN is set
-    model_name = "meta-llama/Llama-2-7b-chat-hf"
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            use_auth_token=hf_token,
-            torch_dtype=torch.float16,
-            device_map="auto"
-        )
-
-        gen_pipeline = pipeline(
-            "text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            max_new_tokens=200,
-            do_sample=True,
-            temperature=0.3,
-            top_p=0.8,
-            repetition_penalty=1.1,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-        return HuggingFacePipeline(pipeline=gen_pipeline)
-    except Exception as e:
-        st.warning(
-            f"Cannot access Llama-2 ({e}). "
-            "To use Llama-2, accept the license at "
-            "https://huggingface.co/meta-llama/Llama-2-7b-chat-hf and ensure HF_TOKEN is set in Render. "
-            "Falling back to distilgpt2...")
-        
-        # Fall back to small model
-        try:
-            fallback = "distilgpt2"
-            tokenizer = AutoTokenizer.from_pretrained(fallback)
-            model = AutoModelForCausalLM.from_pretrained(fallback)
-            gen_pipeline = pipeline(
-                "text-generation",
-                model=model,
-                tokenizer=tokenizer,
-                max_new_tokens=200,
-            )
-            return HuggingFacePipeline(pipeline=gen_pipeline)
-        except Exception as fallback_err:
-            st.error(f"Failed to load fallback model: {fallback_err}")
-            return None
+    return ChatGroq(
+        model="llama3-8b-8192",
+        temperature=0.3,
+        api_key=os.getenv("GROQ_API_KEY")
+    )
 
 # ===============================
-# Safe String Extraction Function
+# Load QA Chain (CACHED)
 # ===============================
-def extract_answer_from_result(result):
-    """Safely extract answer from pipeline result"""
-    if isinstance(result, list) and len(result) > 0:
-        if isinstance(result[0], dict) and 'generated_text' in result[0]:
-            return result[0]['generated_text']
-        elif isinstance(result[0], str):
-            return result[0]
-        else:
-            return str(result[0])
-    elif isinstance(result, str):
-        return result
-    else:
-        return str(result)
+@st.cache_resource
+def load_qa_chain():
+    llm = load_llm()
+    db = load_vectorstore()
+
+    qa = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=db.as_retriever(search_kwargs={"k": 4}),
+        chain_type="stuff",
+        chain_type_kwargs={"prompt": WASLA_PROMPT},
+        return_source_documents=True
+    )
+    return qa
 
 # ===============================
-# Save to CSV
+# Save Chat History
 # ===============================
 def save_to_csv(question, answer):
     with open("chat_history.csv", "a", newline="", encoding="utf-8") as f:
@@ -173,77 +128,13 @@ def save_to_csv(question, answer):
         writer.writerow([question, answer])
 
 # ===============================
-# Custom QA Function
-# ===============================
-def custom_qa(question, llm):
-    if llm is None:
-        return "Error: LLM model failed to load. Please check your HF_TOKEN.", []
-    
-    embeddings = SentenceTransformerEmbeddings(
-        model_name="sentence-transformers/all-mpnet-base-v2",
-        model_kwargs={"device": "cpu"}
-    )
-    
-    db = Chroma(
-        embedding_function=embeddings,
-        persist_directory=CHROMA_SETTINGS.persist_directory
-    )
-    
-    retriever = db.as_retriever(search_kwargs={"k": 3})
-    docs = retriever.get_relevant_documents(question)
-    
-    context = "\n".join([doc.page_content for doc in docs])
-    prompt = WASLA_PROMPT.format(context=context, question=question)
-    
-    result = llm(prompt)
-    result_str = extract_answer_from_result(result)
-
-    if "Answer:" in result_str:
-        split_parts = result_str.split("Answer:")
-        if len(split_parts) > 1:
-            answer = split_parts[1].strip()
-        else:
-            answer = result_str.strip()
-    else:
-        lines = result_str.split('\n')
-        answer_lines = []
-        question_found = False
-        
-        for line in lines:
-            if "Question:" in line:
-                question_found = True
-                continue
-            if question_found and line.strip():
-                answer_lines.append(line.strip())
-        
-        answer = ' '.join(answer_lines).strip()
-    
-    artifacts = [
-        "Based on the following information",
-        "provide a direct answer",
-        "be concise and factual",
-        "Context:",
-        "Question:",
-    ]
-    
-    for artifact in artifacts:
-        if artifact in answer:
-            answer = answer.replace(artifact, "").strip()
-    
-    return answer, docs
-
-# ===============================
 # Streamlit App
 # ===============================
 def main():
-    st.set_page_config(page_title="Wasla Solutions", layout="wide")
-    set_dark_theme()
+    st.title("Wasla Solutions – Chatbot Feedback")
 
-    # ====== Session State for Chat History ======
     if "history" not in st.session_state:
         st.session_state.history = []
-
-    st.title("Wasla Solutions – Chatbot Feedback")
 
     question = st.text_area(
         "Ask a question about the feedback PDFs",
@@ -256,27 +147,36 @@ def main():
             st.warning("Please enter a question.")
             return
 
-        with st.spinner("Processing your question..."):
-            llm = load_llm()
-            answer, source_docs = custom_qa(question, llm)
+        with st.spinner("Thinking..."):
+            qa = load_qa_chain()
+            result = qa({"query": question})
 
-            # Save to session history
-            st.session_state.history.append({"q": question, "a": answer})
+            answer = result["result"]
+            source_docs = result["source_documents"]
 
-            # Save to CSV
+            st.session_state.history.append({
+                "q": question,
+                "a": answer
+            })
+
             save_to_csv(question, answer)
 
         st.subheader("✅ Answer")
         st.write(answer)
 
         with st.expander("📄 Source Documents"):
-            st.write(source_docs)
+            for i, doc in enumerate(source_docs, 1):
+                st.markdown(f"**Document {i}:**")
+                st.write(doc.page_content[:800] + "...")
+                st.markdown("---")
 
-    # ====== Display Chat History ======
+    # ===============================
+    # Chat History
+    # ===============================
     st.subheader("🧠 Chat History")
-    for item in st.session_state.history:
-        st.write(f"**Q:** {item['q']}")
-        st.write(f"**A:** {item['a']}")
+    for item in reversed(st.session_state.history):
+        st.markdown(f"**Q:** {item['q']}")
+        st.markdown(f"**A:** {item['a']}")
         st.markdown("---")
 
 if __name__ == "__main__":
