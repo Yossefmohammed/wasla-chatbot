@@ -74,29 +74,56 @@ def set_dark_theme():
 @st.cache_resource()
 def load_llm():
     hf_token = os.getenv("HF_TOKEN")
+
+    # If no HF token is provided, avoid attempting to download/stream the
+    # large Llama-2 model which will likely OOM on Render. Use a small
+    # fallback model locally and show a clear warning to the user.
+    if not hf_token:
+        try:
+            fallback = "distilgpt2"
+            st.warning(
+                "HF_TOKEN not set — using small fallback model (distilgpt2). "
+                "Set HF_TOKEN in Render environment to load Llama-2.")
+            tokenizer = AutoTokenizer.from_pretrained(fallback)
+            model = AutoModelForCausalLM.from_pretrained(fallback)
+            gen_pipeline = pipeline(
+                "text-generation",
+                model=model,
+                tokenizer=tokenizer,
+                max_new_tokens=200,
+            )
+            return HuggingFacePipeline(pipeline=gen_pipeline)
+        except Exception as e:
+            st.error(f"Failed to load fallback model: {e}")
+            return None
+
+    # Preferred path: use the authenticated Llama-2 model when HF_TOKEN is set
     model_name = "meta-llama/Llama-2-7b-chat-hf"
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        use_auth_token=hf_token,
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            use_auth_token=hf_token,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
 
-    gen_pipeline = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        max_new_tokens=200,
-        do_sample=True,
-        temperature=0.3,
-        top_p=0.8,
-        repetition_penalty=1.1,
-        pad_token_id=tokenizer.eos_token_id
-    )
+        gen_pipeline = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_new_tokens=200,
+            do_sample=True,
+            temperature=0.3,
+            top_p=0.8,
+            repetition_penalty=1.1,
+            pad_token_id=tokenizer.eos_token_id,
+        )
 
-    return HuggingFacePipeline(pipeline=gen_pipeline)
+        return HuggingFacePipeline(pipeline=gen_pipeline)
+    except Exception as e:
+        st.error(f"Failed to load LLM '{model_name}': {e}")
+        return None
 
 # ===============================
 # Safe String Extraction Function
