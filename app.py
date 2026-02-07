@@ -73,7 +73,7 @@ def set_dark_theme():
 # ===============================
 @st.cache_resource()
 def load_llm():
-    hf_token = "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"
+    hf_token = os.getenv("HF_TOKEN")
     model_name = "meta-llama/Llama-2-7b-chat-hf"
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=hf_token)
