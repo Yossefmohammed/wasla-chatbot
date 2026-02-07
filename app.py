@@ -122,8 +122,27 @@ def load_llm():
 
         return HuggingFacePipeline(pipeline=gen_pipeline)
     except Exception as e:
-        st.error(f"Failed to load LLM '{model_name}': {e}")
-        return None
+        st.warning(
+            f"Cannot access Llama-2 ({e}). "
+            "To use Llama-2, accept the license at "
+            "https://huggingface.co/meta-llama/Llama-2-7b-chat-hf and ensure HF_TOKEN is set in Render. "
+            "Falling back to distilgpt2...")
+        
+        # Fall back to small model
+        try:
+            fallback = "distilgpt2"
+            tokenizer = AutoTokenizer.from_pretrained(fallback)
+            model = AutoModelForCausalLM.from_pretrained(fallback)
+            gen_pipeline = pipeline(
+                "text-generation",
+                model=model,
+                tokenizer=tokenizer,
+                max_new_tokens=200,
+            )
+            return HuggingFacePipeline(pipeline=gen_pipeline)
+        except Exception as fallback_err:
+            st.error(f"Failed to load fallback model: {fallback_err}")
+            return None
 
 # ===============================
 # Safe String Extraction Function
