@@ -1,10 +1,17 @@
-streamlit
+streamlit>=1.30.0
+
+# LangChain (OLD, STABLE STYLE — matches your code)
 langchain==0.0.305
 langchain-community==0.0.20
-langchain-core==0.1.23
+
+# DO NOT install langchain-core separately
+# langchain-core is pulled automatically in compatible version
+
 langchain-groq==0.0.1
-sentence-transformers
-chromadb
+
+sentence-transformers==2.2.2
+chromadb==0.4.22
+
 pypdf
 pandas
 python-dotenv
