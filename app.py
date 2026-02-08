@@ -3,6 +3,8 @@ import os
 import csv
 import gc
 from dotenv import load_dotenv
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # Load environment variables from .env file (for local development)
 load_dotenv()
@@ -139,20 +141,60 @@ set_dark_theme()
 # ===============================
 # Load Vector DB (CACHED)
 # ===============================
+
+
 @st.cache_resource
 def load_vectorstore():
-    # Use lighter embedding model to reduce memory footprint (~200MB vs ~500MB)
     embedding_model = os.getenv(
-        "EMBEDDING_MODEL", 
+        "EMBEDDING_MODEL",
         "sentence-transformers/all-MiniLM-L6-v2"
     )
     embeddings = SentenceTransformerEmbeddings(model_name=embedding_model)
 
+    persist_dir = CHROMA_SETTINGS.persist_directory
+
     db = Chroma(
-        persist_directory=CHROMA_SETTINGS.persist_directory,
+        persist_directory=persist_dir,
         embedding_function=embeddings
     )
+
+    try:
+        if db._collection.count() == 0:
+            st.info("📚 Building vector database for the first time...")
+
+            if not os.path.exists("data"):
+                st.error("❌ 'data/' folder not found.")
+                st.stop()
+
+            docs = []
+            for file in os.listdir("data"):
+                if file.lower().endswith(".pdf"):
+                    loader = PyPDFLoader(os.path.join("data", file))
+                    docs.extend(loader.load())
+
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=150
+            )
+            docs = splitter.split_documents(docs)
+
+            if len(docs) == 0:
+                st.error("❌ No text extracted from PDFs.")
+                st.stop()
+
+            db = Chroma.from_documents(
+                docs,
+                embeddings,
+                persist_directory=persist_dir
+            )
+
+    except Exception as e:
+        st.error(f"❌ Failed to build Chroma DB: {e}")
+        st.stop()
+
     return db
+
+
 
 # ===============================
 # Load LLM (Groq – CACHED)
