@@ -141,15 +141,18 @@ set_dark_theme()
 # ===============================
 # Load Vector DB (CACHED)
 # ===============================
-
-
 @st.cache_resource
 def load_vectorstore():
     embedding_model = os.getenv(
         "EMBEDDING_MODEL",
         "sentence-transformers/all-MiniLM-L6-v2"
     )
-    embeddings = SentenceTransformerEmbeddings(model_name=embedding_model)
+
+    try:
+        embeddings = SentenceTransformerEmbeddings(model_name=embedding_model)
+    except Exception as e:
+        st.error(f"❌ Failed to load embeddings model: {e}")
+        st.stop()
 
     persist_dir = CHROMA_SETTINGS.persist_directory
 
@@ -162,14 +165,15 @@ def load_vectorstore():
         if db._collection.count() == 0:
             st.info("📚 Building vector database for the first time...")
 
-            if not os.path.exists("data"):
-                st.error("❌ 'data/' folder not found.")
+            folder_path = "docs"  # <-- changed folder name
+            if not os.path.exists(folder_path):
+                st.error(f"❌ '{folder_path}/' folder not found.")
                 st.stop()
 
             docs = []
-            for file in os.listdir("data"):
+            for file in os.listdir(folder_path):
                 if file.lower().endswith(".pdf"):
-                    loader = PyPDFLoader(os.path.join("data", file))
+                    loader = PyPDFLoader(os.path.join(folder_path, file))
                     docs.extend(loader.load())
 
             splitter = RecursiveCharacterTextSplitter(
@@ -193,8 +197,6 @@ def load_vectorstore():
         st.stop()
 
     return db
-
-
 
 # ===============================
 # Load LLM (Groq – CACHED)
@@ -243,7 +245,6 @@ def load_qa_chain():
             self.k = k
 
         def _call_llm(self, text):
-            # Prefer `predict`, then `invoke`, then call
             try:
                 if hasattr(self.llm, "predict"):
                     return self.llm.predict(text)
@@ -263,7 +264,6 @@ def load_qa_chain():
         def __call__(self, inputs: dict):
             query = inputs.get("query") or inputs.get("question")
             docs = self.retriever.get_relevant_documents(query)
-            # build context from retrieved documents
             context = "\n\n".join([d.page_content for d in docs[: self.k]])
             prompt_text = self.prompt.format(context=context, question=query)
             answer = self._call_llm(prompt_text)
