@@ -35,9 +35,6 @@ RUN pip install --upgrade pip --no-cache-dir
 # Only install the packages you actually need:
 RUN pip install --no-cache-dir \
     streamlit \
-    torch \
-    transformers \
-    bitsandbytes \
     sentence-transformers \
     chromadb \
     langchain==0.0.305 \

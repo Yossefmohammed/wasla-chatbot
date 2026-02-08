@@ -1,10 +1,15 @@
 import streamlit as st
 import os
 import csv
+import gc
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Optimize memory: garbage collection
+gc.enable()
+gc.collect()
 
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -127,9 +132,12 @@ set_dark_theme()
 # ===============================
 @st.cache_resource
 def load_vectorstore():
-    embeddings = SentenceTransformerEmbeddings(
-        model_name="sentence-transformers/all-mpnet-base-v2"
+    # Use lighter embedding model to reduce memory footprint (~200MB vs ~500MB)
+    embedding_model = os.getenv(
+        "EMBEDDING_MODEL", 
+        "sentence-transformers/all-MiniLM-L6-v2"
     )
+    embeddings = SentenceTransformerEmbeddings(model_name=embedding_model)
 
     db = Chroma(
         persist_directory=CHROMA_SETTINGS.persist_directory,
