@@ -3,6 +3,7 @@ langchain==0.0.305
 langchain-community==0.0.20
 langchain-groq==0.0.1
 sentence-transformers==2.2.2
+huggingface_hub==0.16.4
 transformers>=4.35.0
 torch>=2.2.0
 torchvision>=0.16.0
