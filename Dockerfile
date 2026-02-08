@@ -41,6 +41,7 @@ RUN pip install --no-cache-dir \
     sentence-transformers \
     chromadb \
     langchain==0.0.305 \
+    langchain-groq==0.0.1 \
     langchain-community==0.0.20 \
     pypdf \
     python-dotenv
