@@ -39,22 +39,20 @@ from constant import CHROMA_SETTINGS
 st.set_page_config(page_title="Wasla Solutions", layout="wide")
 
 # ===============================
-# 🔥 IMPROVED PROMPT (KEY FIX)
+# PROMPT (PDF-GROUNDED BUT HUMAN)
 # ===============================
 WASLA_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
     template="""
-You are a friendly, conversational AI assistant.
+You are a friendly, professional AI assistant for Wasla Solutions.
 
-Use the context only as background knowledge.
-Never explain your reasoning or mention guidelines.
-Never describe your role or behavior unless asked directly.
-Do not copy text verbatim.
-
-Keep answers natural and human:
-- Short questions → short answers
-- Greetings → simple greetings
-- Informational questions → clear explanations
+Rules:
+- Use the context only as knowledge
+- Never copy text word-for-word
+- Rewrite naturally in your own words
+- If the question is short, keep the answer short
+- If unsure, say so politely
+- Do NOT invent facts outside the context
 
 Context:
 {context}
@@ -65,8 +63,6 @@ User question:
 Answer:
 """
 )
-
-
 
 # ===============================
 # DARK THEME
@@ -85,12 +81,15 @@ def set_dark_theme():
 set_dark_theme()
 
 # ===============================
-# VECTOR DB
+# VECTOR STORE
 # ===============================
 @st.cache_resource
 def load_vectorstore():
     embeddings = SentenceTransformerEmbeddings(
-        model_name=os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+        model_name=os.getenv(
+            "EMBEDDING_MODEL",
+            "sentence-transformers/all-MiniLM-L6-v2"
+        )
     )
 
     db = Chroma(
@@ -122,7 +121,7 @@ def load_vectorstore():
     return db
 
 # ===============================
-# 🔥 LLM (MORE CREATIVE)
+# LLM
 # ===============================
 @st.cache_resource
 def load_llm():
@@ -131,12 +130,12 @@ def load_llm():
 
     return ChatGroq(
         model=os.getenv("GROQ_MODEL", "llama3-8b-8192"),
-        temperature=0.7,   # 🔥 IMPORTANT
+        temperature=0.85,  # more human
         groq_api_key=os.getenv("GROQ_API_KEY")
     )
 
 # ===============================
-# CUSTOM QA CHAIN (GENERATION-FOCUSED)
+# SMART RAG (KEY LOGIC)
 # ===============================
 @st.cache_resource
 def load_qa_chain():
@@ -144,7 +143,7 @@ def load_qa_chain():
     db = load_vectorstore()
 
     retriever = db.as_retriever(
-        search_kwargs={"k": 4}  # more chunks = less repetition
+        search_kwargs={"k": 6}
     )
 
     class SmartRAG:
@@ -152,13 +151,31 @@ def load_qa_chain():
             docs = retriever.get_relevant_documents(query)
             context = "\n\n".join(d.page_content for d in docs)
 
-            prompt = WASLA_PROMPT.format(
-                context=context,
-                question=query
-            )
+            weak_context = len(context.strip()) < 300
+
+            if weak_context:
+                # Conversational but SAFE
+                prompt = f"""
+You are a friendly AI assistant for Wasla Solutions.
+
+Rules:
+- Respond naturally to greetings
+- If the question is unclear, ask politely
+- Do NOT invent services, history, or claims
+- Keep answers short and human
+
+User:
+{query}
+
+Answer:
+"""
+            else:
+                prompt = WASLA_PROMPT.format(
+                    context=context,
+                    question=query
+                )
 
             answer = llm.predict(prompt)
-
             return answer, docs
 
     return SmartRAG()
@@ -180,7 +197,7 @@ def main():
         st.session_state.history = []
 
     question = st.text_area(
-        "Ask a question about the PDFs",
+        "Ask a question",
         height=140,
         placeholder="Ask anything related to the documents..."
     )
