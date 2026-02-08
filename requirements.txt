@@ -1,17 +1,12 @@
 streamlit>=1.30.0
-
-# LangChain (OLD, STABLE STYLE — matches your code)
 langchain==0.0.305
 langchain-community==0.0.20
-
-# DO NOT install langchain-core separately
-# langchain-core is pulled automatically in compatible version
-
 langchain-groq==0.0.1
-
 sentence-transformers==2.2.2
+transformers>=4.35.0
+torch>=2.2.0
+torchvision>=0.16.0
 chromadb==0.4.22
-
 pypdf
 pandas
 python-dotenv
