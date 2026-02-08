@@ -44,13 +44,17 @@ st.set_page_config(page_title="Wasla Solutions", layout="wide")
 WASLA_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
     template="""
-You are an intelligent assistant.
+You are a helpful, conversational AI assistant.
 
-Use the following text ONLY as background knowledge.
-Do NOT copy sentences directly.
-Explain the answer in your own words, clearly and naturally.
+Use the context only as background knowledge.
+Do NOT mention the context or documents unless asked.
+Do NOT explain your reasoning process.
+Do NOT copy sentences verbatim.
 
-If the information is incomplete, use logical reasoning to provide the best possible answer.
+Adapt your response style to the question:
+- If the question is short or casual, answer briefly.
+- If the question is detailed, give a clear explanation.
+- Avoid repetition and unnecessary introductions.
 
 Context:
 {context}
@@ -58,9 +62,10 @@ Context:
 Question:
 {question}
 
-Think step by step, then provide a helpful final answer:
+Answer naturally, like ChatGPT:
 """
 )
+
 
 # ===============================
 # DARK THEME
