@@ -4,8 +4,17 @@ import csv
 import gc
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load environment variables from .env file (for local development)
 load_dotenv()
+
+# For Streamlit Cloud: load from secrets manager
+try:
+    if hasattr(st, 'secrets') and st.secrets:
+        for key, value in st.secrets.items():
+            if key not in os.environ:
+                os.environ[key] = str(value)
+except Exception:
+    pass
 
 # Optimize memory: garbage collection
 gc.enable()
