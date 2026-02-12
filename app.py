@@ -332,7 +332,7 @@ def retry(max_retries=5, delay=3):
     return decorator
 
 # ===============================
-# ENHANCED SMART RAG SYSTEM – STRICT DOCUMENT‑ONLY + CREATIVE
+# ENHANCED SMART RAG SYSTEM – STRICT DOCUMENT‑ONLY + CREATIVE + POLISHED
 # ===============================
 def load_qa_chain():
     llm = load_llm()
@@ -403,6 +403,7 @@ def load_qa_chain():
                 summaries.append(f"[{source_name}] {preview}")
             return "\n\n".join(summaries)
         
+        # ---------- REPETITION DETECTION – LOWERED THRESHOLD TO 0.82 ----------
         def check_repetition(self, query) -> Tuple[bool, int]:
             if not self.history:
                 return False, 0
@@ -415,11 +416,11 @@ def load_qa_chain():
                 threshold = 0.78 + recency_boost
                 if similarity > threshold:
                     similar_count += 1
-                    if similarity > 0.85:
+                    if similarity > 0.82:  # 🔥 Lowered from 0.85 → catches more similar questions
                         is_repeat = True
             return is_repeat, similar_count
         
-        # ---------- STRICT PROMPT – ONLY FROM CONTEXT + CREATIVITY RULES ----------
+        # ---------- STRICT PROMPT – ONLY FROM CONTEXT + CREATIVITY + NO REPETITIVE PATTERNS ----------
         def generate_prompt(self, query, context, history_context="", 
                            repeat=False, repeat_count=0):
             
@@ -436,12 +437,13 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 6. Maximum 5 sentences.
 7. End with ONE focused follow-up question (only if you actually answered something).
 
-🔥 CREATIVITY & ENGAGEMENT RULES (CRITICAL FOR USER FEEDBACK):
+🔥 CREATIVITY & VARIETY RULES (CRITICAL FOR USER FEEDBACK):
 8. Be warm, conversational, and enthusiastic – like a senior consultant who genuinely loves their work.
 9. Vary your sentence structure and vocabulary – do NOT repeat the same phrases across different answers.
 10. Use rhetorical questions, mild emphasis, and confident language (e.g., "Great question!", "Exactly!", "Here's what I'd suggest…").
 11. Never sound like a robot – avoid bullet points, numbered lists, or overly formal phrasing unless it's a direct quote from context.
-12. If you are repeating an answer (repeat=True), you MUST use completely different wording and offer a fresh angle or example – never copy the previous response."""
+12. 🚫 **NEVER start an answer with "You're looking for…" or similar repetitive rhetorical patterns.** Vary your openings.
+13. If you are repeating an answer (repeat=True), you MUST use completely different wording and offer a fresh angle or example – never copy the previous response."""
 
             if repeat_count >= 2:
                 return f"""{base_instruction}
@@ -451,8 +453,9 @@ The user has asked about this topic multiple times. Do NOT repeat previous answe
 Previous answers:
 {history_context}
 
-STRONG INSTRUCTION:
+🔥 STRONG INSTRUCTION:
 - Acknowledge we've covered this.
+- Your response must be **completely different** in wording and structure from any previous answers.
 - Offer ONE completely new angle, insight, or example (ONLY from CONTEXT).
 - Ask a specific, more advanced follow-up question.
 
@@ -467,8 +470,8 @@ The user is asking a similar question again.
 Previous answers:
 {history_context}
 
-STRONG INSTRUCTION:
-- Use completely different wording – do not reuse phrases from previous answers.
+🔥 STRONG INSTRUCTION:
+- Use **completely different wording** – do not reuse phrases, adjectives, or sentence patterns from previous answers.
 - Add a new example, metaphor, or perspective (ONLY from CONTEXT).
 - Keep it concise (3-4 sentences).
 
@@ -500,17 +503,27 @@ Consultant response:"""
                     seen.add(source_name)
             return answer + "\n".join(citation_lines)
         
-        # ---------- MAIN CALL – STRICT GREETING DETECTION, VARIETY, "HOW ARE YOU" HANDLER ----------
+        # ---------- MAIN CALL – FULLY GROUNDED, NO HALLUCINATIONS, POLISHED ----------
         def __call__(self, query, callback=None):
             intent, confidence = self.detect_intent(query)
             timestamp = datetime.now().isoformat()
             q_lower = query.lower().strip()
             words = q_lower.split()
             
-            # ---------- GREETING MODE – ONLY TRIGGER FOR ACTUAL GREETINGS ----------
-            # Strict rule: only if query is essentially a greeting (≤3 words and high confidence)
+            # ---------- GREETING MODE – STRICT, VARIED, WITH DEDICATED HANDLERS ----------
             if intent == "greeting" and confidence > 0.7 and len(words) <= 3:
-                # Special handler for "how are you" – brief, friendly, varies
+                
+                # 🚩 DEDICATED "what's up" HANDLER – SHORT & CONCISE
+                if q_lower in ["what's up", "whats up", "sup"]:
+                    answer = random.choice([
+                        "Not much, just here to help! What can I do for you?",
+                        "Hey! Ready to dive into some digital strategy. How can I assist?",
+                        "All good! What's on your mind today?"
+                    ])
+                    if callback: callback(answer)
+                    return answer, [], intent
+                
+                # 🚩 DEDICATED "how are you" HANDLER – WARM & VARIED
                 if any(phrase in q_lower for phrase in ["how are you", "how's it going", "how are things"]):
                     prompts = [
                         "We're doing well, thank you! How can we assist you today?",
@@ -521,10 +534,11 @@ Consultant response:"""
                     if callback: callback(answer)
                     return answer, [], intent
                 
-                # Generic greeting – vary response each time
+                # 🚩 GENERIC GREETING – MAXIMUM VARIETY
                 prompt = f"""You are the digital front desk of Wasla Solutions.
 Be warm, brief, and professional. Maximum 7 words. 
-Vary your greeting – do not repeat the same phrase.
+Vary your greeting – do NOT repeat the same phrase. 
+Be creative with your openings.
 Do not mention being an AI.
 
 User: {query}
@@ -535,20 +549,29 @@ Response:"""
                         answer = random.choice([
                             "Wasla Solutions – how can we help?",
                             "Welcome to Wasla! What can we do for you?",
-                            "Hi there – Wasla here, ready to help."
+                            "Hi there – Wasla here, ready to help.",
+                            "Wasla at your service. What brings you in?",
+                            "Hello! How can Wasla support you today?",
+                            "Greetings from Wasla! What can we assist with?",
+                            "Hey! Wasla here – what do you need?",
+                            "Wasla Solutions. How may we help?"
                         ])
                 except:
                     answer = random.choice([
                         "Wasla Solutions – how can we help?",
                         "Welcome to Wasla! How may we assist?",
-                        "Hi! Wasla here – what can we do for you today?"
+                        "Hi! Wasla here – what can we do for you today?",
+                        "Hello from Wasla! What brings you here?",
+                        "Wasla – ready to help. What's your challenge?"
                     ])
                 if callback: callback(answer)
                 return answer, [], intent
 
             # ---------- SMALL TALK MODE – BRANDED FOR IDENTITY, NEUTRAL FOR OTHERS ----------
             if intent == "small_talk" and confidence > 0.7:
-                # Branded answer for "who are you / what can you do"
+                q_lower = query.lower()
+                
+                # 🚩 Branded answer for "who are you / what can you do" – VARIED
                 if any(phrase in q_lower for phrase in ["who are you", "what are you", "what can you do", "your name"]):
                     answer = random.choice([
                         "We're Wasla Solutions – a digital strategy consultancy. We specialise in AI, digital transformation, and growth strategy. How can we help you today?",
