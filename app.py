@@ -7,6 +7,7 @@ import json
 import time
 import random
 import traceback
+import requests  # 👈 NEW: for API validation
 from datetime import datetime
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, Tuple
@@ -147,6 +148,34 @@ def set_dark_theme():
 set_dark_theme()
 
 # ===============================
+# 🛡️ API KEY VALIDATION
+# ===============================
+def validate_groq_api_key(api_key):
+    """Test Groq API key validity with a minimal request."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama3-8b-8192",  # safe, known-good model
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 5
+    }
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=10
+        )
+        if r.status_code == 200:
+            return True, "✅ API key is valid."
+        else:
+            return False, f"❌ Groq API error: {r.status_code} - {r.text}"
+    except Exception as e:
+        return False, f"❌ Could not reach Groq API: {e}"
+
+# ===============================
 # SESSION STATE INIT
 # ===============================
 def init_session_state():
@@ -270,29 +299,42 @@ def load_documents_to_vectorstore(embeddings, persist_dir):
     return db
 
 # ===============================
-# LLM WITH STREAMING
+# LLM WITH STREAMING + VALIDATION
 # ===============================
 @st.cache_resource
 def load_llm():
-    """Load LLM with streaming support"""
+    """Load LLM with streaming support, after validating API key."""
     if ChatGroq is None:
         raise RuntimeError("langchain-groq not installed. Please install it with: pip install langchain-groq")
     
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        st.error("❌ GROQ_API_KEY not found in secrets or environment.")
+        st.stop()
+    
+    # 🔍 Validate the key before using it
+    is_valid, message = validate_groq_api_key(api_key)
+    if not is_valid:
+        st.error(message)
+        st.info("Please check your Groq API key in Streamlit secrets or .env file.")
+        st.stop()
+    
     return ChatGroq(
-        model=os.getenv("GROQ_MODEL", "llama3-70b-8192"),
+        model=os.getenv("GROQ_MODEL", "llama3-70b-8192"),   # safe default
         temperature=0.6,
-        groq_api_key=os.getenv("GROQ_API_KEY"),
+        groq_api_key=api_key,
         streaming=True,
         max_tokens=1024
     )
 
 # ===============================
-# ROBUST RETRY DECORATOR
+# 🛡️ ROBUST RETRY DECORATOR (no retry on 4xx)
 # ===============================
 def retry(max_retries=5, delay=3):
     """
     Exponential backoff retry decorator.
-    Retries on ANY exception – rate limits, network errors, etc.
+    Retries ONLY on rate limits (429) and server errors (5xx).
+    Does NOT retry on client errors (401, 403, 404, etc.).
     """
     def decorator(func):
         @wraps(func)
@@ -301,7 +343,21 @@ def retry(max_retries=5, delay=3):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    wait = delay * (2 ** i) + random.uniform(0, 0.5)  # jitter
+                    err_str = str(e).lower()
+                    
+                    # 🚫 Do NOT retry on client errors – fail fast
+                    if any(x in err_str for x in ["401", "403", "404", "invalid api key", "not found", "model not found"]):
+                        raise  # re-raise immediately
+                    
+                    # ✅ Retry on rate limit or server errors
+                    if "429" in err_str or "rate limit" in err_str or "500" in err_str or "503" in err_str:
+                        wait = delay * (2 ** i) + random.uniform(0, 0.5)
+                        print(f"⚠️ LLM call failed (attempt {i+1}/{max_retries}): {e}. Retrying in {wait:.1f}s")
+                        time.sleep(wait)
+                        continue
+                    
+                    # For other errors (network, timeout) – retry as well
+                    wait = delay * (2 ** i) + random.uniform(0, 0.5)
                     print(f"⚠️ LLM call failed (attempt {i+1}/{max_retries}): {e}. Retrying in {wait:.1f}s")
                     time.sleep(wait)
                     continue
@@ -321,7 +377,7 @@ def load_qa_chain():
         search_kwargs={"k": 3}
     )
     
-    # Cheaper model for summarisation + fallback
+    # Cheaper model for summarisation + fallback (safe default)
     cheap_llm = ChatGroq(
         model="llama3-8b-8192",
         temperature=0.3,
