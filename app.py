@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime
 from dotenv import load_dotenv
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
 # ===============================
@@ -73,20 +73,15 @@ st.set_page_config(
 def set_dark_theme():
     st.markdown("""
     <style>
-    /* Main background */
     .stApp {
         background: linear-gradient(135deg, #0B1020 0%, #151B2B 100%);
         color: #EAEAF2;
     }
-    
-    /* Container styling */
     section.main > div {
         max-width: 1000px;
         margin: auto;
         padding: 2rem;
     }
-    
-    /* Text areas */
     textarea {
         background-color: rgba(17, 24, 39, 0.8) !important;
         color: #E5E7EB !important;
@@ -96,8 +91,6 @@ def set_dark_theme():
         font-size: 16px !important;
         backdrop-filter: blur(10px);
     }
-    
-    /* Buttons */
     button {
         background: linear-gradient(45deg, #2563EB, #3B82F6) !important;
         color: white !important;
@@ -107,19 +100,14 @@ def set_dark_theme():
         font-weight: 600 !important;
         transition: transform 0.2s, box-shadow 0.2s !important;
     }
-    
     button:hover {
         transform: translateY(-2px);
         box-shadow: 0 8px 20px rgba(37, 99, 235, 0.3) !important;
     }
-    
-    /* Sidebar button specific */
     section[data-testid="stSidebar"] button {
         width: 100%;
         margin: 0.2rem 0;
     }
-    
-    /* Cards for chat history */
     .chat-card {
         background: rgba(31, 41, 55, 0.5);
         border-radius: 12px;
@@ -128,8 +116,6 @@ def set_dark_theme():
         border: 1px solid rgba(75, 85, 99, 0.3);
         backdrop-filter: blur(10px);
     }
-    
-    /* Source citations */
     .source-badge {
         background: #1F2937;
         color: #9CA3AF;
@@ -139,8 +125,6 @@ def set_dark_theme():
         display: inline-block;
         margin: 0.2rem;
     }
-    
-    /* Feedback buttons */
     .feedback-btn {
         background: transparent !important;
         border: 1px solid #4B5563 !important;
@@ -148,13 +132,11 @@ def set_dark_theme():
         width: auto !important;
         padding: 0.3rem 1rem !important;
     }
-    
     .feedback-btn:hover {
         background: #2563EB !important;
         border-color: #2563EB !important;
         color: white !important;
     }
-    
     footer {visibility: hidden;}
     </style>
     """, unsafe_allow_html=True)
@@ -208,7 +190,6 @@ def load_vectorstore():
     
     persist_dir = CHROMA_SETTINGS.persist_directory
     
-    # Ensure persist directory exists
     os.makedirs(persist_dir, exist_ok=True)
     
     try:
@@ -217,13 +198,11 @@ def load_vectorstore():
             embedding_function=embeddings
         )
         
-        # If no documents exist, load from docs folder
         if db._collection.count() == 0:
             db = load_documents_to_vectorstore(embeddings, persist_dir)
             
     except Exception as e:
         st.error(f"Error loading vector store: {str(e)}")
-        # Create new vector store
         db = load_documents_to_vectorstore(embeddings, persist_dir)
     
     return db
@@ -233,10 +212,8 @@ def load_documents_to_vectorstore(embeddings, persist_dir):
     docs = []
     folder_path = "docs"
     
-    # Create docs folder if it doesn't exist
     os.makedirs(folder_path, exist_ok=True)
     
-    # Supported file extensions and their loaders
     loaders = {
         '.pdf': PyPDFLoader,
         '.txt': TextLoader,
@@ -261,7 +238,6 @@ def load_documents_to_vectorstore(embeddings, persist_dir):
                 st.sidebar.error(f"❌ Failed to load {file}: {str(e)}")
     
     if not docs:
-        # Add a sample document if no docs exist
         sample_content = """Wasla Solutions is a digital strategy consulting firm 
         specializing in AI implementation, digital transformation, and strategic 
         advisory for enterprises. We help businesses leverage cutting-edge technology 
@@ -274,7 +250,6 @@ def load_documents_to_vectorstore(embeddings, persist_dir):
         loader = TextLoader(sample_path)
         docs = loader.load()
     
-    # Split documents
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=900,
         chunk_overlap=200,
@@ -282,7 +257,6 @@ def load_documents_to_vectorstore(embeddings, persist_dir):
     )
     docs = splitter.split_documents(docs)
     
-    # Create vector store
     db = Chroma.from_documents(
         docs,
         embeddings,
@@ -310,7 +284,7 @@ def load_llm():
     )
 
 # ===============================
-# ENHANCED SMART RAG SYSTEM
+# ENHANCED SMART RAG SYSTEM (WITH ALL IMPROVEMENTS)
 # ===============================
 def load_qa_chain():
     """Load the enhanced QA chain with all improvements"""
@@ -333,7 +307,6 @@ def load_qa_chain():
         # Enhanced Intent Detection
         # ---------------------------
         def _load_greetings(self):
-            """Load expanded greetings database"""
             return [
                 "hi", "hello", "hey", "greetings", "good morning", 
                 "good afternoon", "good evening", "howdy", "hi there",
@@ -343,19 +316,15 @@ def load_qa_chain():
             ]
         
         def detect_intent(self, query):
-            """Enhanced intent detection with confidence scoring"""
             q = query.lower().strip()
             
-            # Check for exact matches
             if q in self.greetings_db:
                 return "greeting", 1.0
             
-            # Check for partial matches in greetings
             for greeting in self.greetings_db[:10]:
                 if greeting in q:
                     return "greeting", 0.9
             
-            # Small talk patterns
             small_talk_patterns = [
                 "who are you", "what are you", "what can you do",
                 "your name", "capabilities", "help me with",
@@ -369,17 +338,14 @@ def load_qa_chain():
             return "business", 0.8
         
         # ---------------------------
-        # Enhanced Summarization
+        # Summarization with Source Labels
         # ---------------------------
         def summarize_chunks(self, docs):
-            """Improved summarization with better prompt engineering"""
             if not docs:
                 return "No relevant documents found."
             
             summaries = []
-            
             for i, d in enumerate(docs):
-                # Get source filename
                 source = d.metadata.get('source', 'Unknown')
                 source_name = os.path.basename(source) if source != 'Unknown' else f'Document {i+1}'
                 
@@ -399,41 +365,89 @@ Key insights:"""
                 try:
                     summary = llm.invoke(prompt).content
                     summaries.append(f"[{source_name}] {summary.strip()}")
-                except Exception as e:
+                except Exception:
                     summaries.append(f"[{source_name}] {d.page_content[:100]}...")
             
             return "\n".join(summaries)
         
         # ---------------------------
-        # Enhanced Repetition Detection
+        # FIX 2: Better Repetition Detection (lower threshold + count)
         # ---------------------------
-        def is_repeat_question(self, query):
-            """Improved repetition detection with temporal decay"""
+        def check_repetition(self, query) -> Tuple[bool, int]:
+            """
+            Returns (is_repeat, similarity_count)
+            - is_repeat: True if the most similar question exceeds threshold
+            - similarity_count: number of highly similar questions in last 8
+            """
             if not self.history:
-                return False
+                return False, 0
             
             q_emb = self.embed_model.encode(query, convert_to_tensor=True)
+            similar_count = 0
+            is_repeat = False
             
-            # Check last 10 questions with decreasing threshold
-            for i, (_, _, prev_emb, _) in enumerate(self.history[-10:]):
+            for i, (prev_q, _, prev_emb, _) in enumerate(self.history[-8:]):
                 similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
                 
-                # More recent questions get stricter threshold
+                # Lowered threshold: 0.78 + slight recency boost
                 recency_boost = 1 - (i / 20)
-                threshold = 0.85 + recency_boost
+                threshold = 0.78 + recency_boost
                 
                 if similarity > threshold:
-                    return True
-            return False
+                    similar_count += 1
+                    if similarity > 0.85:  # very high similarity -> definitely repeat
+                        is_repeat = True
+            
+            return is_repeat, similar_count
         
         # ---------------------------
-        # Generate Prompt with History
+        # FIX 3 & 4: System Prompt with Identity & Boilerplate Ban
         # ---------------------------
-        def generate_prompt(self, query, context, history_context="", repeat=False):
-            """Generate prompt with conversation history"""
+        def generate_prompt(self, query, context, history_context="", 
+                           repeat=False, repeat_count=0):
+            """
+            Generate prompt with:
+            - "we/us/our" identity enforcement
+            - ban on overused phrase "Each project is assessed..."
+            - redirect mode for multiple repeats
+            """
             
+            # Base identity and tone instructions
+            base_instruction = """You are a senior digital strategy consultant at Wasla Solutions.
+
+CRITICAL IDENTITY RULE: Always refer to Wasla Solutions as "we", "us", or "our". NEVER use "they", "the company", or "Wasla" as a third party.
+
+STRICT RULES:
+- Maximum 5 sentences
+- Lead with specific, actionable advice
+- Zero marketing fluff or corporate jargon
+- End with ONE focused follow-up question
+- Use context only if directly relevant
+- NEVER use the phrase "Each project is assessed properly after a direct conversation with the team" or any close variation."""
+
+            # Redirect mode for 2+ repeats
+            if repeat_count >= 2:
+                return f"""{base_instruction}
+
+The user has asked about this topic multiple times. Do NOT repeat previous answers.
+
+Previous answers:
+{history_context}
+
+Instead:
+1. Acknowledge we've discussed this
+2. Offer ONE new angle or deeper insight
+3. Ask a specific, more advanced follow-up question
+
+Question: {query}
+
+Consultant response:"""
+            
+            # Standard repeat mode (first repeat)
             if repeat:
-                return f"""The user is asking a similar question again.
+                return f"""{base_instruction}
+
+The user is asking a similar question again.
 
 Previous answers:
 {history_context}
@@ -447,14 +461,8 @@ Question: {query}
 
 New answer:"""
             
-            return f"""You are a senior digital strategy consultant at Wasla Solutions.
-
-STRICT RULES:
-- Maximum 5 sentences
-- Lead with specific, actionable advice
-- Zero marketing fluff or corporate jargon
-- End with ONE focused follow-up question
-- Use context only if directly relevant
+            # Normal business mode
+            return f"""{base_instruction}
 
 {history_context}
 
@@ -467,38 +475,55 @@ User question:
 Consultant response:"""
         
         # ---------------------------
-        # Main Call with Streaming
+        # FIX 5: Inline Citations
+        # ---------------------------
+        def add_inline_citations(self, answer: str, docs: List) -> str:
+            """Append source citations to the answer."""
+            if not docs:
+                return answer
+            
+            citation_lines = ["\n\n**Sources:**"]
+            seen = set()
+            for i, doc in enumerate(docs[:3], 1):
+                source = doc.metadata.get('source', 'Unknown')
+                source_name = os.path.basename(source) if source != 'Unknown' else f'Document {i}'
+                if source_name not in seen:
+                    citation_lines.append(f"- [{i}] {source_name}")
+                    seen.add(source_name)
+            
+            return answer + "\n".join(citation_lines)
+        
+        # ---------------------------
+        # Main Call with All Fixes
         # ---------------------------
         def __call__(self, query, callback=None):
-            """Main entry point with streaming support"""
-            
             intent, confidence = self.detect_intent(query)
             timestamp = datetime.now().isoformat()
             
-            # GREETING MODE
+            # ---------- GREETING MODE (FIX 1: Concise) ----------
             if intent == "greeting" and confidence > 0.7:
-                prompt = f"""You are a friendly consultant. Respond in ONE sentence.
+                prompt = f"""You are a friendly, concise consultant.
+STRICT RULE: Maximum 10 words. No fluff.
 
 User: {query}
-
 Response:"""
                 try:
                     answer = llm.invoke(prompt).content
+                    # Enforce length limit
+                    words = answer.split()
+                    if len(words) > 12:
+                        answer = "Hello! How can I help you today?"
                 except:
                     answer = "Hello! How can I help you today?"
                 
                 if callback:
                     callback(answer)
-                
                 return answer, [], intent
             
-            # SMALL TALK MODE
+            # ---------- SMALL TALK MODE ----------
             if intent == "small_talk" and confidence > 0.7:
                 prompt = f"""You are a Wasla Solutions AI assistant. Be helpful and brief.
-
-User: {query}
-
-Response (1-2 sentences):"""
+Response (1-2 sentences): {query}"""
                 try:
                     answer = llm.invoke(prompt).content
                 except:
@@ -506,19 +531,15 @@ Response (1-2 sentences):"""
                 
                 if callback:
                     callback(answer)
-                
                 return answer, [], intent
             
-            # BUSINESS MODE
+            # ---------- BUSINESS MODE ----------
             try:
-                # Get relevant documents
                 docs = retriever.get_relevant_documents(query)
-                
-                # Summarize context
                 context = self.summarize_chunks(docs) if docs else ""
                 
-                # Check for repetition
-                repeat = self.is_repeat_question(query)
+                # Enhanced repetition check
+                is_repeat, repeat_count = self.check_repetition(query)
                 
                 # Build conversation history
                 history_context = ""
@@ -528,17 +549,21 @@ Response (1-2 sentences):"""
                     for q, a, _, _ in recent:
                         history_context += f"Q: {q}\nA: {a}\n\n"
                 
-                # Generate prompt
-                prompt = self.generate_prompt(query, context, history_context, repeat)
+                # Generate prompt with all improvements
+                prompt = self.generate_prompt(
+                    query, context, history_context, 
+                    repeat=is_repeat, repeat_count=repeat_count
+                )
                 
-                # Get answer
                 answer = llm.invoke(prompt).content
+                
+                # Add inline citations
+                answer = self.add_inline_citations(answer, docs)
                 
                 # Store in history
                 q_emb = self.embed_model.encode(query, convert_to_tensor=True)
                 self.history.append((query, answer, q_emb, timestamp))
                 
-                # Keep history manageable
                 if len(self.history) > 50:
                     self.history = self.history[-50:]
                 
@@ -548,7 +573,7 @@ Response (1-2 sentences):"""
                 return answer, docs, intent
                 
             except Exception as e:
-                error_msg = f"I encountered an issue while processing your request. Please try again or rephrase your question."
+                error_msg = "I encountered an issue. Please try again or rephrase."
                 return error_msg, [], intent
     
     return EnhancedSmartRAG()
@@ -557,13 +582,9 @@ Response (1-2 sentences):"""
 # ENHANCED DATA PERSISTENCE
 # ===============================
 def save_conversation(question, answer, intent="business", feedback=None):
-    """Save conversation with metadata"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Create data directory if it doesn't exist
     os.makedirs("data", exist_ok=True)
     
-    # Save to CSV
     file_exists = os.path.isfile("data/conversations.csv")
     with open("data/conversations.csv", "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -571,7 +592,6 @@ def save_conversation(question, answer, intent="business", feedback=None):
             writer.writerow(["timestamp", "question", "answer", "intent", "feedback"])
         writer.writerow([timestamp, question, answer, intent, feedback or ""])
     
-    # Also save to JSON for easier analysis
     json_file = "data/conversations.json"
     conversation = {
         "timestamp": timestamp,
@@ -589,8 +609,6 @@ def save_conversation(question, answer, intent="business", feedback=None):
         conversations = []
     
     conversations.append(conversation)
-    
-    # Keep last 1000 conversations
     if len(conversations) > 1000:
         conversations = conversations[-1000:]
     
@@ -598,12 +616,11 @@ def save_conversation(question, answer, intent="business", feedback=None):
         json.dump(conversations, f, indent=2)
 
 def save_feedback(question, feedback_type):
-    """Save user feedback"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
     os.makedirs("data", exist_ok=True)
     
-    file_exists = os.isfile("data/feedback.csv")
+    # FIX 6: Typo correction
+    file_exists = os.path.isfile("data/feedback.csv")
     with open("data/feedback.csv", "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if not file_exists:
@@ -614,15 +631,11 @@ def save_feedback(question, feedback_type):
 # SIDEBAR COMPONENTS
 # ===============================
 def render_sidebar():
-    """Render sidebar with document management and analytics"""
-    
     with st.sidebar:
         st.markdown("## 🚀 Wasla Solutions")
         st.markdown("---")
         
-        # Document Management
         st.markdown("### 📁 Document Management")
-        
         uploaded_files = st.file_uploader(
             "Upload documents",
             type=['pdf', 'txt', 'csv', 'docx', 'doc', 'pptx', 'ppt'],
@@ -632,62 +645,41 @@ def render_sidebar():
         
         if uploaded_files:
             for uploaded_file in uploaded_files:
-                # Save uploaded file
                 save_path = os.path.join("docs", uploaded_file.name)
                 os.makedirs("docs", exist_ok=True)
-                
                 with open(save_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
-                
                 st.success(f"✅ {uploaded_file.name} uploaded")
             
-            # Clear cache to reload documents
             st.cache_resource.clear()
             st.session_state.qa_chain = load_qa_chain()
             st.rerun()
         
         st.markdown("---")
-        
-        # Quick Stats
         st.markdown("### 📊 Session Stats")
         col1, col2 = st.columns(2)
-        
         with col1:
             user_messages = [m for m in st.session_state.messages if m.get("role") == "user"]
-            st.metric(
-                "Questions",
-                len(user_messages)
-            )
-        
+            st.metric("Questions", len(user_messages))
         with col2:
-            st.metric(
-                "Session ID",
-                st.session_state.get("session_id", "N/A")[:8],
-                help="Unique session identifier"
-            )
+            st.metric("Session ID", st.session_state.get("session_id", "N/A")[:8])
         
         st.markdown("---")
-        
-        # Clear Chat
         if st.button("🗑️ Clear Chat History", use_container_width=True):
             st.session_state.messages = []
             st.session_state.feedback_given = set()
             st.rerun()
         
-        # Export Chat - FIXED THE BUG HERE
         if st.session_state.messages:
             chat_entries = []
             for m in st.session_state.messages:
                 if m["role"] == "user":
-                    # Find the corresponding assistant message
                     chat_entries.append(f"Q: {m['content']}")
                 elif m["role"] == "assistant":
-                    # Add the last user's Q with this A
                     if chat_entries and not chat_entries[-1].startswith("A:"):
                         chat_entries[-1] += f"\nA: {m['content']}"
             
             chat_text = "\n\n".join(chat_entries)
-            
             st.download_button(
                 "📥 Export Chat",
                 chat_text,
@@ -699,27 +691,19 @@ def render_sidebar():
 # MAIN CHAT INTERFACE
 # ===============================
 def main():
-    """Main application with enhanced chat interface"""
-    
-    # Initialize session
     init_session_state()
-    
-    # Render sidebar
     render_sidebar()
     
-    # Main chat area
     st.markdown(
         "<h1 style='text-align: center; margin-bottom: 2rem;'>"
         "🤖 Wasla AI Strategy Consultant</h1>",
         unsafe_allow_html=True
     )
     
-    # Display chat messages
     for idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             
-            # Show sources for assistant messages
             if message["role"] == "assistant" and "sources" in message and message["sources"]:
                 with st.expander("📚 View Sources", expanded=False):
                     for i, source in enumerate(message["sources"][:3], 1):
@@ -729,10 +713,8 @@ def main():
                         st.markdown(f"**Document {i}:** `{source_name}`")
                         st.markdown(f"```\n{source.page_content[:300]}...\n```")
             
-            # Show feedback buttons for assistant messages
             if message["role"] == "assistant" and "id" in message:
                 msg_id = message["id"]
-                
                 if msg_id not in st.session_state.feedback_given:
                     col1, col2, col3 = st.columns([1, 1, 20])
                     with col1:
@@ -746,34 +728,26 @@ def main():
                             st.session_state.feedback_given.add(msg_id)
                             st.rerun()
     
-    # Chat input
     prompt = st.chat_input("Ask about Wasla's services, digital strategy, or business challenges...")
     
     if prompt:
-        # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt})
-        
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Generate response
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
-            
             def stream_callback(text):
                 message_placeholder.markdown(text + "▌")
             
             try:
                 with st.spinner("🤔 Analyzing..."):
                     answer, sources, intent = st.session_state.qa_chain(
-                        prompt, 
-                        callback=stream_callback
+                        prompt, callback=stream_callback
                     )
                 
-                # Display final answer
                 message_placeholder.markdown(answer)
                 
-                # Show sources if available
                 if sources:
                     with st.expander("📚 Sources", expanded=False):
                         for i, source in enumerate(sources[:3], 1):
@@ -781,10 +755,8 @@ def main():
                                 source.metadata.get('source', f'document_{i}')
                             )
                             st.markdown(f"**{i}. {source_name}**")
-                            preview = source.page_content[:200] + "..."
-                            st.caption(preview)
+                            st.caption(source.page_content[:200] + "...")
                 
-                # Add assistant message to history
                 message_id = hashlib.md5(
                     f"{prompt}{datetime.now()}{len(st.session_state.messages)}".encode()
                 ).hexdigest()
@@ -797,19 +769,16 @@ def main():
                     "id": message_id
                 })
                 
-                # Store current for feedback
                 st.session_state.current_question = prompt
                 st.session_state.current_answer = answer
                 st.session_state.current_sources = sources
                 
-                # Save conversation
                 save_conversation(prompt, answer, intent)
                 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
                 st.info("Please try again or contact support.")
     
-    # Footer
     st.markdown("---")
     st.markdown(
         "<p style='text-align: center; color: #6B7280; font-size: 0.8rem;'>"
@@ -823,7 +792,6 @@ def main():
 # CONSTANT.PY HANDLING
 # ===============================
 if __name__ == "__main__":
-    # Create constant.py if it doesn't exist
     if not os.path.exists("constant.py"):
         with open("constant.py", "w") as f:
             f.write('''from dataclasses import dataclass
