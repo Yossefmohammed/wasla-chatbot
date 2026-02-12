@@ -888,4 +888,3 @@ class CHROMA_SETTINGS:
 ''')
     
     main()
-    validate_groq_api_key()
