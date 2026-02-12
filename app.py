@@ -157,7 +157,7 @@ def validate_groq_api_key(api_key):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "llama3-8b-8192",  # safe, known-good model
+        "model": "llama-3.1-8b-instant",  # ✅ currently supported
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 5
     }
@@ -888,3 +888,4 @@ class CHROMA_SETTINGS:
 ''')
     
     main()
+    validate_groq_api_key()
