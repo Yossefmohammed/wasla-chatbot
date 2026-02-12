@@ -104,31 +104,32 @@ def load_llm():
 
     return ChatGroq(
         model=os.getenv("GROQ_MODEL", "llama3-8b-8192"),
-        temperature=0.75,  # slightly lower for concise answers
+        temperature=0.7,  # balanced
         groq_api_key=os.getenv("GROQ_API_KEY")
     )
 
 # ===============================
-# SMART RAG (IMPROVED)
+# SMART RAG (CONSULTANT MODE)
 # ===============================
-@st.cache_resource
-def load_qa_chain():
+def load_qa_chain():   # Removed cache for session isolation
     llm = load_llm()
     db = load_vectorstore()
     retriever = db.as_retriever(search_kwargs={"k": 6})
 
     class SmartRAG:
         def __init__(self):
-            self.history = []  # Stores (question, answer, embedding)
-            self.embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+            self.history = []
+            self.embed_model = SentenceTransformer(
+                "sentence-transformers/all-MiniLM-L6-v2"
+            )
 
         def summarize_chunks(self, docs):
-            """Summarize PDF chunks for concise knowledge."""
             summaries = []
             for d in docs:
                 prompt = f"""
-Summarize this text in your own words, focusing on key points.
-Do NOT copy sentences verbatim. Be concise.
+Summarize this text briefly in your own words.
+Focus only on key information.
+Do NOT copy sentences.
 
 Text:
 {d.page_content}
@@ -137,62 +138,74 @@ Summary:
 """
                 summary = llm.predict(prompt)
                 summaries.append(summary.strip())
+
             return "\n".join(summaries)
 
         def is_repeat_question(self, query):
-            """Check if the question is semantically similar to previous ones."""
             if not self.history:
                 return False
+
             q_emb = self.embed_model.encode(query, convert_to_tensor=True)
-            for _, _, prev_emb in self.history[-10:]:
+
+            for _, _, prev_emb in self.history[-5:]:
                 similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
-                if similarity > 0.85:  # threshold for repeat
+                if similarity > 0.85:
                     return True
             return False
 
         def generate_prompt(self, query, context, repeat=False):
-            """Generate LLM prompt using context and conversation history."""
-            previous_answers = [a for _, a, _ in self.history[-10:]]
+
+            previous_answers = [a for _, a, _ in self.history[-5:]]
             previous_text = ""
             if previous_answers:
-                previous_text = "Previous answers:\n" + "\n".join(f"- {a}" for a in previous_answers) + "\n"
+                previous_text = "Previous answers (avoid repeating):\n" + "\n".join(
+                    f"- {a}" for a in previous_answers
+                ) + "\n"
 
             if repeat:
                 return f"""
-You already answered a similar question before. Please rephrase the answer concisely, keeping it human and informative.
-
-Previous answer context:
-{previous_text}
-
-User question:
-{query}
-
-Answer:
-"""
-
-            if len(context.strip()) < 300:
-                # Weak context → fallback conversational prompt
-                return f"""
-You are a friendly AI assistant for Wasla Solutions.
-- Respond naturally to greetings
-- If the question is unclear, ask politely
-- Do NOT invent services or claims
-- Keep answers short and human
+You already answered something very similar.
+Rephrase the answer differently and shorter.
+Avoid repeating structure.
 
 User:
 {query}
 
 Answer:
 """
-            else:
+
+            # Greeting / small talk mode
+            if len(context.strip()) < 200:
                 return f"""
-You are a professional AI assistant for Wasla Solutions.
-- Use the context to answer accurately
-- Rewrite everything in your own words, do NOT copy verbatim
-- Avoid repeating previous answers
-- Keep answers concise and human-friendly
+You are a smart, natural AI assistant representing Wasla Solutions.
+
+Rules:
+- If greeting → respond briefly (1 sentence).
+- No marketing tone.
+- No pushing services unless asked.
+- Keep it human and natural.
+
+User:
+{query}
+
+Answer:
+"""
+
+            # Consultant mode
+            return f"""
+You are a senior digital strategy consultant at Wasla Solutions.
+
+Rules:
+- Max 4–6 sentences.
+- Give actionable advice FIRST.
+- Avoid marketing language.
+- Avoid generic phrases.
+- Ask at most ONE focused follow-up question.
+- Do not repeat previous answers.
+- Be confident and practical.
 
 {previous_text}
+
 Context:
 {context}
 
@@ -206,12 +219,13 @@ Answer:
             docs = retriever.get_relevant_documents(query)
             context = self.summarize_chunks(docs)
             repeat = self.is_repeat_question(query)
-            prompt = self.generate_prompt(query, context, repeat=repeat)
+
+            prompt = self.generate_prompt(query, context, repeat)
             answer = llm.predict(prompt)
 
-            # Save question, answer, embedding for future repeat detection
             q_emb = self.embed_model.encode(query, convert_to_tensor=True)
             self.history.append((query, answer, q_emb))
+
             return answer, docs
 
     return SmartRAG()
@@ -227,7 +241,10 @@ def save_to_csv(q, a):
 # STREAMLIT APP
 # ===============================
 def main():
-    st.title("Wasla Solutions – AI PDF Chatbot")
+    st.title("Wasla Solutions – AI Strategy Chatbot")
+
+    if "qa_chain" not in st.session_state:
+        st.session_state.qa_chain = load_qa_chain()
 
     if "history" not in st.session_state:
         st.session_state.history = []
@@ -235,7 +252,7 @@ def main():
     question = st.text_area(
         "Ask a question",
         height=140,
-        placeholder="Ask anything related to the documents..."
+        placeholder="Ask anything related to Wasla or your business..."
     )
 
     if st.button("Submit"):
@@ -244,8 +261,7 @@ def main():
             return
 
         with st.spinner("Thinking..."):
-            qa = load_qa_chain()
-            answer, sources = qa(question)
+            answer, sources = st.session_state.qa_chain(question)
 
             st.session_state.history.append((question, answer))
             save_to_csv(question, answer)
@@ -256,7 +272,7 @@ def main():
         with st.expander("📄 Source Context"):
             for i, doc in enumerate(sources, 1):
                 st.markdown(f"**Chunk {i}**")
-                st.write(doc.page_content[:700] + "...")
+                st.write(doc.page_content[:600] + "...")
                 st.markdown("---")
 
     st.subheader("🧠 Chat History")
