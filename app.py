@@ -343,7 +343,7 @@ def load_qa_chain():
     db = load_vectorstore()
     retriever = db.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 3}
+        search_kwargs={"k": 3}  # Reduce to 2 or 1 for even faster responses
     )
     
     cheap_llm = ChatGroq(
@@ -437,7 +437,9 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 4. NEVER mention Wasla's location, team size, founding date, or any other fact unless it appears in the CONTEXT.
 5. Always refer to Wasla Solutions as "we", "us", or "our".
 6. Maximum 5 sentences.
-7. End with ONE focused follow-up question (only if you actually answered something)."""
+7. End with ONE focused follow-up question (only if you actually answered something).
+8. Be warm, conversational, and helpful – like a senior consultant, not a robot.
+9. Use natural language, vary sentence structure, and avoid repetitive phrasing."""
 
             if repeat_count >= 2:
                 return f"""{base_instruction}
@@ -501,28 +503,37 @@ Consultant response:"""
             intent, confidence = self.detect_intent(query)
             timestamp = datetime.now().isoformat()
             
-            # ---------- GREETING MODE – NEUTRAL, NO COMPANY CLAIMS ----------
+            # ---------- GREETING MODE – BRANDED, WELCOMING ----------
             if intent == "greeting" and confidence > 0.7:
-                prompt = f"""You are a helpful assistant.
-Maximum 5 words. No company information.
+                prompt = f"""You are the digital front desk of Wasla Solutions.
+Be warm, brief, and professional. Maximum 7 words. Do not mention being an AI.
 
 User: {query}
 Response:"""
                 try:
                     answer = self.safe_llm_invoke(prompt)
-                    if len(answer.split()) > 7:
-                        answer = "Hello! How can I help?"
+                    if len(answer.split()) > 8:
+                        answer = "Wasla Solutions – how can we help you today?"
                 except:
-                    answer = "Hello! How can I help?"
+                    answer = "Wasla Solutions – how can we help you today?"
                 if callback: callback(answer)
                 return answer, [], intent
 
-            # ---------- SMALL TALK MODE – NEUTRAL, UNLESS IT'S A LOCATION QUESTION (HANDLED BY BUSINESS MODE) ----------
+            # ---------- SMALL TALK MODE – BRANDED FOR IDENTITY, NEUTRAL FOR OTHERS ----------
             if intent == "small_talk" and confidence > 0.7:
                 q_lower = query.lower()
-                # If it's a location question, let business mode handle it (with retrieval)
+                
+                # 🚩 Branded answer for "who are you / what can you do"
+                if any(phrase in q_lower for phrase in ["who are you", "what are you", "what can you do", "your name"]):
+                    answer = "We are Wasla Solutions – a digital strategy consultancy. We specialise in AI, digital transformation, and growth strategy. How can we help you today?"
+                    if callback: callback(answer)
+                    return answer, [], intent
+                
+                # Location questions → handled by business mode (RAG) if documents contain location
                 if any(phrase in q_lower for phrase in ["where are you", "your location", "headquarters", "based"]):
                     pass  # fall through to business mode
+                
+                # Generic small talk – keep neutral, no company claims
                 else:
                     prompt = f"""You are a helpful assistant.
 One short sentence. Do not mention any company details.
@@ -532,7 +543,7 @@ Response:"""
                     try:
                         answer = self.safe_llm_invoke(prompt)
                     except:
-                        answer = "I'm here to help with questions about our documents."
+                        answer = "I'm here to help with questions about our services."
                     if callback: callback(answer)
                     return answer, [], intent
 
