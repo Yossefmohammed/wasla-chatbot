@@ -39,32 +39,6 @@ from constant import CHROMA_SETTINGS
 st.set_page_config(page_title="Wasla Solutions", layout="wide")
 
 # ===============================
-# PROMPT (PDF-GROUNDED BUT HUMAN)
-# ===============================
-WASLA_PROMPT = PromptTemplate(
-    input_variables=["context", "question"],
-    template="""
-You are a friendly, professional AI assistant for Wasla Solutions.
-
-Rules:
-- Use the context only as knowledge
-- Never copy text word-for-word
-- Rewrite naturally in your own words
-- If the question is short, keep the answer short
-- If unsure, say so politely
-- Do NOT invent facts outside the context
-
-Context:
-{context}
-
-User question:
-{question}
-
-Answer:
-"""
-)
-
-# ===============================
 # DARK THEME
 # ===============================
 def set_dark_theme():
@@ -135,30 +109,46 @@ def load_llm():
     )
 
 # ===============================
-# SMART RAG (KEY LOGIC)
+# SMART RAG (IMPROVED)
 # ===============================
 @st.cache_resource
 def load_qa_chain():
     llm = load_llm()
     db = load_vectorstore()
-
-    retriever = db.as_retriever(
-        search_kwargs={"k": 6}
-    )
+    retriever = db.as_retriever(search_kwargs={"k": 6})
 
     class SmartRAG:
-        def __call__(self, query):
-            docs = retriever.get_relevant_documents(query)
-            context = "\n\n".join(d.page_content for d in docs)
+        def __init__(self):
+            self.history = []  # conversation history
 
-            weak_context = len(context.strip()) < 300
+        def summarize_chunks(self, docs):
+            """Summarize PDF chunks for better understanding."""
+            summaries = []
+            for d in docs:
+                prompt = f"""
+Summarize this text in your own words, focusing on the key points. 
+Do NOT copy sentences verbatim. Be concise.
 
-            if weak_context:
-                # Conversational but SAFE
+Text:
+{d.page_content}
+
+Summary:
+"""
+                summary = llm.predict(prompt)
+                summaries.append(summary.strip())
+            return "\n".join(summaries)
+
+        def generate_prompt(self, query, context):
+            """Generate LLM prompt including history to avoid repetition."""
+            previous_answers = [a for _, a in self.history[-10:]]
+            previous_text = ""
+            if previous_answers:
+                previous_text = "Previous answers:\n" + "\n".join(f"- {a}" for a in previous_answers) + "\n"
+
+            if len(context.strip()) < 300:
+                # Weak context → generic conversational fallback
                 prompt = f"""
 You are a friendly AI assistant for Wasla Solutions.
-
-Rules:
 - Respond naturally to greetings
 - If the question is unclear, ask politely
 - Do NOT invent services, history, or claims
@@ -170,12 +160,30 @@ User:
 Answer:
 """
             else:
-                prompt = WASLA_PROMPT.format(
-                    context=context,
-                    question=query
-                )
+                prompt = f"""
+You are a professional AI assistant for Wasla Solutions.
+- Use the context to answer accurately
+- Rewrite everything in your own words, do NOT copy verbatim
+- Avoid repeating previous answers
+- Keep answers human-friendly
 
+{previous_text}
+Context:
+{context}
+
+User question:
+{query}
+
+Answer:
+"""
+            return prompt
+
+        def __call__(self, query):
+            docs = retriever.get_relevant_documents(query)
+            context = self.summarize_chunks(docs)
+            prompt = self.generate_prompt(query, context)
             answer = llm.predict(prompt)
+            self.history.append((query, answer))
             return answer, docs
 
     return SmartRAG()
