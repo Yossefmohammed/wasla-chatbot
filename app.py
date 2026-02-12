@@ -24,7 +24,6 @@ gc.collect()
 
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
-from langchain.prompts import PromptTemplate
 
 try:
     from langchain_groq import ChatGroq
@@ -32,6 +31,7 @@ except Exception:
     ChatGroq = None
 
 from constant import CHROMA_SETTINGS
+from sentence_transformers import SentenceTransformer, util
 
 # ===============================
 # PAGE CONFIG
@@ -104,7 +104,7 @@ def load_llm():
 
     return ChatGroq(
         model=os.getenv("GROQ_MODEL", "llama3-8b-8192"),
-        temperature=0.85,  # more human
+        temperature=0.75,  # slightly lower for concise answers
         groq_api_key=os.getenv("GROQ_API_KEY")
     )
 
@@ -119,14 +119,15 @@ def load_qa_chain():
 
     class SmartRAG:
         def __init__(self):
-            self.history = []  # conversation history
+            self.history = []  # Stores (question, answer, embedding)
+            self.embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
         def summarize_chunks(self, docs):
-            """Summarize PDF chunks for better understanding."""
+            """Summarize PDF chunks for concise knowledge."""
             summaries = []
             for d in docs:
                 prompt = f"""
-Summarize this text in your own words, focusing on the key points. 
+Summarize this text in your own words, focusing on key points.
 Do NOT copy sentences verbatim. Be concise.
 
 Text:
@@ -138,20 +139,44 @@ Summary:
                 summaries.append(summary.strip())
             return "\n".join(summaries)
 
-        def generate_prompt(self, query, context):
-            """Generate LLM prompt including history to avoid repetition."""
-            previous_answers = [a for _, a in self.history[-10:]]
+        def is_repeat_question(self, query):
+            """Check if the question is semantically similar to previous ones."""
+            if not self.history:
+                return False
+            q_emb = self.embed_model.encode(query, convert_to_tensor=True)
+            for _, _, prev_emb in self.history[-10:]:
+                similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
+                if similarity > 0.85:  # threshold for repeat
+                    return True
+            return False
+
+        def generate_prompt(self, query, context, repeat=False):
+            """Generate LLM prompt using context and conversation history."""
+            previous_answers = [a for _, a, _ in self.history[-10:]]
             previous_text = ""
             if previous_answers:
                 previous_text = "Previous answers:\n" + "\n".join(f"- {a}" for a in previous_answers) + "\n"
 
+            if repeat:
+                return f"""
+You already answered a similar question before. Please rephrase the answer concisely, keeping it human and informative.
+
+Previous answer context:
+{previous_text}
+
+User question:
+{query}
+
+Answer:
+"""
+
             if len(context.strip()) < 300:
-                # Weak context → generic conversational fallback
-                prompt = f"""
+                # Weak context → fallback conversational prompt
+                return f"""
 You are a friendly AI assistant for Wasla Solutions.
 - Respond naturally to greetings
 - If the question is unclear, ask politely
-- Do NOT invent services, history, or claims
+- Do NOT invent services or claims
 - Keep answers short and human
 
 User:
@@ -160,12 +185,12 @@ User:
 Answer:
 """
             else:
-                prompt = f"""
+                return f"""
 You are a professional AI assistant for Wasla Solutions.
 - Use the context to answer accurately
 - Rewrite everything in your own words, do NOT copy verbatim
 - Avoid repeating previous answers
-- Keep answers human-friendly
+- Keep answers concise and human-friendly
 
 {previous_text}
 Context:
@@ -176,14 +201,17 @@ User question:
 
 Answer:
 """
-            return prompt
 
         def __call__(self, query):
             docs = retriever.get_relevant_documents(query)
             context = self.summarize_chunks(docs)
-            prompt = self.generate_prompt(query, context)
+            repeat = self.is_repeat_question(query)
+            prompt = self.generate_prompt(query, context, repeat=repeat)
             answer = llm.predict(prompt)
-            self.history.append((query, answer))
+
+            # Save question, answer, embedding for future repeat detection
+            q_emb = self.embed_model.encode(query, convert_to_tensor=True)
+            self.history.append((query, answer, q_emb))
             return answer, docs
 
     return SmartRAG()
