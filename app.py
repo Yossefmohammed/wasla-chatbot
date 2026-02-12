@@ -103,18 +103,18 @@ def load_llm():
         raise RuntimeError("langchain-groq not installed")
 
     return ChatGroq(
-        model=os.getenv("GROQ_MODEL", "llama3-8b-8192"),
-        temperature=0.7,  # balanced
+        model=os.getenv("GROQ_MODEL", "llama3-70b-8192"),  # upgraded
+        temperature=0.6,
         groq_api_key=os.getenv("GROQ_API_KEY")
     )
 
 # ===============================
-# SMART RAG (CONSULTANT MODE)
+# SMART RAG SYSTEM
 # ===============================
-def load_qa_chain():   # Removed cache for session isolation
+def load_qa_chain():
     llm = load_llm()
     db = load_vectorstore()
-    retriever = db.as_retriever(search_kwargs={"k": 6})
+    retriever = db.as_retriever(search_kwargs={"k": 5})
 
     class SmartRAG:
         def __init__(self):
@@ -123,11 +123,40 @@ def load_qa_chain():   # Removed cache for session isolation
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
 
+        # ---------------------------
+        # Intent Detection
+        # ---------------------------
+        def detect_intent(self, query):
+            q = query.lower().strip()
+
+            greetings = [
+                "hi", "hello", "hey",
+                "good morning", "good evening",
+                "how are you", "what's up", "whats up"
+            ]
+
+            small_talk = [
+                "how are you doing",
+                "what are you doing",
+                "who are you"
+            ]
+
+            if q in greetings:
+                return "greeting"
+
+            if any(phrase in q for phrase in small_talk):
+                return "small_talk"
+
+            return "business"
+
+        # ---------------------------
+        # Summarize Retrieved Docs
+        # ---------------------------
         def summarize_chunks(self, docs):
             summaries = []
             for d in docs:
                 prompt = f"""
-Summarize this text briefly in your own words.
+Summarize this text briefly.
 Focus only on key information.
 Do NOT copy sentences.
 
@@ -141,6 +170,9 @@ Summary:
 
             return "\n".join(summaries)
 
+        # ---------------------------
+        # Repetition Detection
+        # ---------------------------
         def is_repeat_question(self, query):
             if not self.history:
                 return False
@@ -149,24 +181,27 @@ Summary:
 
             for _, _, prev_emb in self.history[-5:]:
                 similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
-                if similarity > 0.85:
+                if similarity > 0.88:
                     return True
             return False
 
+        # ---------------------------
+        # Generate Prompt
+        # ---------------------------
         def generate_prompt(self, query, context, repeat=False):
 
             previous_answers = [a for _, a, _ in self.history[-5:]]
+
             previous_text = ""
             if previous_answers:
-                previous_text = "Previous answers (avoid repeating):\n" + "\n".join(
-                    f"- {a}" for a in previous_answers
-                ) + "\n"
+                previous_text = "Avoid repeating these previous answers:\n"
+                previous_text += "\n".join(f"- {a}" for a in previous_answers)
 
             if repeat:
                 return f"""
-You already answered something very similar.
-Rephrase the answer differently and shorter.
-Avoid repeating structure.
+The user asked a similar question before.
+Rephrase the answer differently.
+Be shorter and avoid same structure.
 
 User:
 {query}
@@ -174,35 +209,17 @@ User:
 Answer:
 """
 
-            # Greeting / small talk mode
-            if len(context.strip()) < 200:
-                return f"""
-You are a smart, natural AI assistant representing Wasla Solutions.
-
-Rules:
-- If greeting → respond briefly (1 sentence).
-- No marketing tone.
-- No pushing services unless asked.
-- Keep it human and natural.
-
-User:
-{query}
-
-Answer:
-"""
-
-            # Consultant mode
             return f"""
 You are a senior digital strategy consultant at Wasla Solutions.
 
 Rules:
-- Max 4–6 sentences.
-- Give actionable advice FIRST.
-- Avoid marketing language.
+- 4–6 sentences max.
+- Give actionable advice first.
+- Avoid marketing tone.
 - Avoid generic phrases.
 - Ask at most ONE focused follow-up question.
-- Do not repeat previous answers.
-- Be confident and practical.
+- Be practical and confident.
+- Use provided context only if relevant.
 
 {previous_text}
 
@@ -215,7 +232,43 @@ User question:
 Answer:
 """
 
+        # ---------------------------
+        # Main Call
+        # ---------------------------
         def __call__(self, query):
+
+            intent = self.detect_intent(query)
+
+            # GREETING MODE
+            if intent == "greeting":
+                prompt = f"""
+Respond naturally and briefly (1 sentence).
+Be friendly and human.
+Do NOT mention services.
+
+User:
+{query}
+
+Answer:
+"""
+                answer = llm.predict(prompt)
+                return answer, []
+
+            # SMALL TALK MODE
+            if intent == "small_talk":
+                prompt = f"""
+Respond conversationally and briefly.
+No marketing language.
+
+User:
+{query}
+
+Answer:
+"""
+                answer = llm.predict(prompt)
+                return answer, []
+
+            # BUSINESS MODE
             docs = retriever.get_relevant_documents(query)
             context = self.summarize_chunks(docs)
             repeat = self.is_repeat_question(query)
@@ -269,11 +322,12 @@ def main():
         st.subheader("✅ Answer")
         st.write(answer)
 
-        with st.expander("📄 Source Context"):
-            for i, doc in enumerate(sources, 1):
-                st.markdown(f"**Chunk {i}**")
-                st.write(doc.page_content[:600] + "...")
-                st.markdown("---")
+        if sources:
+            with st.expander("📄 Source Context"):
+                for i, doc in enumerate(sources, 1):
+                    st.markdown(f"**Chunk {i}**")
+                    st.write(doc.page_content[:600] + "...")
+                    st.markdown("---")
 
     st.subheader("🧠 Chat History")
     for q, a in reversed(st.session_state.history):
