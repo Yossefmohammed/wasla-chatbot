@@ -5,6 +5,7 @@ import gc
 import hashlib
 import json
 import time
+import random
 import traceback
 from datetime import datetime
 from dotenv import load_dotenv
@@ -286,10 +287,13 @@ def load_llm():
     )
 
 # ===============================
-# RETRY DECORATOR
+# ROBUST RETRY DECORATOR
 # ===============================
-def retry(max_retries=3, delay=1):
-    """Exponential backoff retry decorator"""
+def retry(max_retries=5, delay=3):
+    """
+    Exponential backoff retry decorator.
+    Retries on ANY exception – rate limits, network errors, etc.
+    """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -297,12 +301,11 @@ def retry(max_retries=3, delay=1):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    if "rate limit" in str(e).lower() or "429" in str(e):
-                        wait = delay * (2 ** i)
-                        time.sleep(wait)
-                        continue
-                    raise
-            raise Exception(f"Max retries ({max_retries}) exceeded")
+                    wait = delay * (2 ** i) + random.uniform(0, 0.5)  # jitter
+                    print(f"⚠️ LLM call failed (attempt {i+1}/{max_retries}): {e}. Retrying in {wait:.1f}s")
+                    time.sleep(wait)
+                    continue
+            raise Exception(f"Max retries ({max_retries}) exceeded. Last error: {e}")
         return wrapper
     return decorator
 
@@ -315,10 +318,10 @@ def load_qa_chain():
     db = load_vectorstore()
     retriever = db.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 3}  # Retrieve only top 3 chunks
+        search_kwargs={"k": 3}
     )
     
-    # Cheaper model for summarisation – will be passed to the class
+    # Cheaper model for summarisation + fallback
     cheap_llm = ChatGroq(
         model="llama3-8b-8192",
         temperature=0.3,
@@ -333,13 +336,13 @@ def load_qa_chain():
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
             self.greetings_db = self._load_greetings()
-            self.cheap_llm = cheap_llm   # ✅ store cheap model
-            self.main_llm = llm          # ✅ store main model
+            self.cheap_llm = cheap_llm
+            self.main_llm = llm
         
         # ---------------------------
         # Retry‑enabled LLM call
         # ---------------------------
-        @retry(max_retries=3, delay=2)
+        @retry(max_retries=5, delay=3)
         def safe_llm_invoke(self, prompt, model="main"):
             """Call LLM with retry logic."""
             if model == "cheap":
@@ -360,35 +363,30 @@ def load_qa_chain():
         
         def detect_intent(self, query):
             q = query.lower().strip()
-            
             if q in self.greetings_db:
                 return "greeting", 1.0
-            
             for greeting in self.greetings_db[:10]:
                 if greeting in q:
                     return "greeting", 0.9
-            
             small_talk_patterns = [
                 "who are you", "what are you", "what can you do",
                 "your name", "capabilities", "help me with",
                 "what do you know", "how do you work"
             ]
-            
             for pattern in small_talk_patterns:
                 if pattern in q:
                     return "small_talk", 0.9
-            
             return "business", 0.8
         
         # ---------------------------
-        # Optimised Summarization (cheap model, fallback to raw text)
+        # Optimised Summarization (fallback to raw text)
         # ---------------------------
         def summarize_chunks(self, docs):
             if not docs:
                 return "No relevant documents found."
             
             summaries = []
-            for i, d in enumerate(docs[:2]):  # only top 2 chunks
+            for i, d in enumerate(docs[:2]):
                 source = d.metadata.get('source', 'Unknown')
                 source_name = os.path.basename(source) if source != 'Unknown' else f'Document {i+1}'
                 
@@ -406,12 +404,10 @@ Requirements:
 Key insights:"""
                 
                 try:
-                    # ✅ use self.cheap_llm via safe_llm_invoke
                     summary = self.safe_llm_invoke(prompt, model="cheap")
                     summaries.append(f"[{source_name}] {summary.strip()}")
                 except Exception as e:
-                    # Fallback: show first 100 characters
-                    print(f"⚠️ Summarisation failed for {source_name}: {e}")
+                    print(f"⚠️ Summarisation failed for {source_name}, using raw text: {e}")
                     summaries.append(f"[{source_name}] {d.page_content[:100]}...")
             
             return "\n".join(summaries)
@@ -422,21 +418,17 @@ Key insights:"""
         def check_repetition(self, query) -> Tuple[bool, int]:
             if not self.history:
                 return False, 0
-            
             q_emb = self.embed_model.encode(query, convert_to_tensor=True)
             similar_count = 0
             is_repeat = False
-            
             for i, (prev_q, _, prev_emb, _) in enumerate(self.history[-8:]):
                 similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
                 recency_boost = 1 - (i / 20)
                 threshold = 0.78 + recency_boost
-                
                 if similarity > threshold:
                     similar_count += 1
                     if similarity > 0.85:
                         is_repeat = True
-            
             return is_repeat, similar_count
         
         # ---------------------------
@@ -509,7 +501,6 @@ Consultant response:"""
         def add_inline_citations(self, answer: str, docs: List) -> str:
             if not docs:
                 return answer
-            
             citation_lines = ["\n\n**Sources:**"]
             seen = set()
             for i, doc in enumerate(docs[:3], 1):
@@ -518,11 +509,10 @@ Consultant response:"""
                 if source_name not in seen:
                     citation_lines.append(f"- [{i}] {source_name}")
                     seen.add(source_name)
-            
             return answer + "\n".join(citation_lines)
         
         # ---------------------------
-        # Main Call – Fully Fixed
+        # Main Call – Fully Fixed with Fallbacks
         # ---------------------------
         def __call__(self, query, callback=None):
             intent, confidence = self.detect_intent(query)
@@ -581,8 +571,23 @@ Response (1-2 sentences): {query}"""
                     repeat=is_repeat, repeat_count=repeat_count
                 )
                 
-                # Main LLM call with retry
-                answer = self.safe_llm_invoke(prompt)
+                # --- Main LLM call with fallback chain ---
+                answer = None
+                try:
+                    answer = self.safe_llm_invoke(prompt)          # try main model
+                except Exception as e:
+                    print(f"❌ Main LLM failed: {e}. Trying cheap model...")
+                    try:
+                        # Fallback: use cheap model for answer
+                        fallback_prompt = f"""You are a Wasla consultant. Answer concisely (max 3 sentences) without marketing fluff.
+
+User question: {query}
+
+Answer:"""
+                        answer = self.safe_llm_invoke(fallback_prompt, model="cheap")
+                    except Exception as e2:
+                        print(f"❌ Cheap LLM also failed: {e2}. Using static fallback.")
+                        answer = "I'm currently experiencing high demand. Please try again in a moment or contact us directly at info@waslasolutions.com."
                 
                 # Add citations
                 answer = self.add_inline_citations(answer, docs)
@@ -597,18 +602,11 @@ Response (1-2 sentences): {query}"""
                 return answer, docs, intent
                 
             except Exception as e:
-                # 🔥 CRITICAL: Log the FULL error to Streamlit Cloud logs
-                print("❌ BUSINESS MODE EXCEPTION (FIXED VERSION):")
+                print("❌ BUSINESS MODE UNRECOVERABLE ERROR:")
                 traceback.print_exc()
-                
-                # User‑friendly message
-                if "rate limit" in str(e).lower() or "429" in str(e):
-                    error_msg = "We're receiving many requests – please wait a moment and try again."
-                else:
-                    error_msg = "I encountered an issue. Please try again or rephrase."
+                error_msg = "I encountered an unexpected issue. Please try again or contact support."
                 return error_msg, [], intent
     
-    # ✅ Pass cheap_llm to the class
     return EnhancedSmartRAG(cheap_llm)
 
 # ===============================
