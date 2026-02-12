@@ -289,7 +289,7 @@ def load_llm():
         st.info("Please check your Groq API key in Streamlit secrets or .env file.")
         st.stop()
     
-    # ✅ FIXED: Default model is now a supported, non‑decommissioned model
+    # ✅ Supported, non‑decommissioned model
     model_name = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
     
     return ChatGroq(
@@ -315,9 +315,9 @@ def retry(max_retries=5, delay=3):
                     last_exception = e
                     err_str = str(e).lower()
                     
-                    # 🚫 Do NOT retry on client errors – fail fast (now includes 400)
+                    # 🚫 Do NOT retry on client errors – fail fast
                     if any(x in err_str for x in ["400", "401", "403", "404", "invalid api key", "not found", "model not found"]):
-                        raise  # re-raise immediately
+                        raise
                     
                     # ✅ Retry on rate limit or server errors
                     if "429" in err_str or "rate limit" in err_str or "500" in err_str or "503" in err_str:
@@ -326,7 +326,7 @@ def retry(max_retries=5, delay=3):
                         time.sleep(wait)
                         continue
                     
-                    # For other errors (network, timeout) – retry as well
+                    # Other errors (network, timeout) – retry
                     wait = delay * (2 ** i) + random.uniform(0, 0.5)
                     print(f"⚠️ LLM call failed (attempt {i+1}/{max_retries}): {e}. Retrying in {wait:.1f}s")
                     time.sleep(wait)
@@ -336,7 +336,7 @@ def retry(max_retries=5, delay=3):
     return decorator
 
 # ===============================
-# ENHANCED SMART RAG SYSTEM
+# ENHANCED SMART RAG SYSTEM – STRICT DOCUMENT‑ONLY
 # ===============================
 def load_qa_chain():
     llm = load_llm()
@@ -395,32 +395,17 @@ def load_qa_chain():
                     return "small_talk", 0.9
             return "business", 0.8
         
+        # ---------- RAW CONTEXT PREVIEW (NO LLM) – FAST & FACTUAL ----------
         def summarize_chunks(self, docs):
             if not docs:
-                return "No relevant documents found."
+                return ""
             summaries = []
             for i, d in enumerate(docs[:2]):
                 source = d.metadata.get('source', 'Unknown')
                 source_name = os.path.basename(source) if source != 'Unknown' else f'Document {i+1}'
-                prompt = f"""You are an expert consultant. Extract ONLY the key business insights from this text.
-
-Text:
-{d.page_content}
-
-Requirements:
-- 1-2 sentences maximum
-- Focus on actionable information
-- Include specific numbers or facts if present
-- No fluff or marketing language
-
-Key insights:"""
-                try:
-                    summary = self.safe_llm_invoke(prompt, model="cheap")
-                    summaries.append(f"[{source_name}] {summary.strip()}")
-                except Exception as e:
-                    print(f"⚠️ Summarisation failed for {source_name}, using raw text: {e}")
-                    summaries.append(f"[{source_name}] {d.page_content[:100]}...")
-            return "\n".join(summaries)
+                preview = d.page_content[:300].replace('\n', ' ') + "..."
+                summaries.append(f"[{source_name}] {preview}")
+            return "\n\n".join(summaries)
         
         def check_repetition(self, query) -> Tuple[bool, int]:
             if not self.history:
@@ -438,19 +423,22 @@ Key insights:"""
                         is_repeat = True
             return is_repeat, similar_count
         
+        # ---------- STRICT PROMPT – ONLY FROM CONTEXT ----------
         def generate_prompt(self, query, context, history_context="", 
                            repeat=False, repeat_count=0):
-            base_instruction = """You are a senior digital strategy consultant at Wasla Solutions.
+            
+            base_instruction = """You are a consultant representing Wasla Solutions.
 
-CRITICAL IDENTITY RULE: Always refer to Wasla Solutions as "we", "us", or "our". NEVER use "they", "the company", or "Wasla" as a third party.
+STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
+1. ONLY use information from the provided CONTEXT section.
+2. If the CONTEXT does NOT contain the answer, say ONLY:
+   "I don't have information about that in my knowledge base."
+3. NEVER use your own knowledge, training data, or any external information.
+4. NEVER mention Wasla's location, team size, founding date, or any other fact unless it appears in the CONTEXT.
+5. Always refer to Wasla Solutions as "we", "us", or "our".
+6. Maximum 5 sentences.
+7. End with ONE focused follow-up question (only if you actually answered something)."""
 
-STRICT RULES:
-- Maximum 5 sentences
-- Lead with specific, actionable advice
-- Zero marketing fluff or corporate jargon
-- End with ONE focused follow-up question
-- Use context only if directly relevant
-- NEVER use the phrase "Each project is assessed properly after a direct conversation with the team" or any close variation."""
             if repeat_count >= 2:
                 return f"""{base_instruction}
 
@@ -461,7 +449,7 @@ Previous answers:
 
 Instead:
 1. Acknowledge we've discussed this
-2. Offer ONE new angle or deeper insight
+2. Offer ONE new angle or deeper insight (ONLY from CONTEXT)
 3. Ask a specific, more advanced follow-up question
 
 Question: {query}
@@ -477,7 +465,7 @@ Previous answers:
 
 Provide a fresh perspective:
 - Use completely different wording
-- Add a new example or angle
+- Add a new example or angle (ONLY from CONTEXT)
 - Keep it concise (3-4 sentences)
 
 Question: {query}
@@ -487,7 +475,7 @@ New answer:"""
 
 {history_context}
 
-Context:
+CONTEXT:
 {context}
 
 User question:
@@ -508,41 +496,59 @@ Consultant response:"""
                     seen.add(source_name)
             return answer + "\n".join(citation_lines)
         
+        # ---------- MAIN CALL – FULLY GROUNDED, NO HALLUCINATIONS ----------
         def __call__(self, query, callback=None):
             intent, confidence = self.detect_intent(query)
             timestamp = datetime.now().isoformat()
             
-            # ---------- GREETING MODE ----------
+            # ---------- GREETING MODE – NEUTRAL, NO COMPANY CLAIMS ----------
             if intent == "greeting" and confidence > 0.7:
-                prompt = f"""You are a friendly, concise consultant.
-STRICT RULE: Maximum 10 words. No fluff.
+                prompt = f"""You are a helpful assistant.
+Maximum 5 words. No company information.
 
 User: {query}
 Response:"""
                 try:
                     answer = self.safe_llm_invoke(prompt)
-                    if len(answer.split()) > 12:
-                        answer = "Hello! How can I help you today?"
+                    if len(answer.split()) > 7:
+                        answer = "Hello! How can I help?"
                 except:
-                    answer = "Hello! How can I help you today?"
+                    answer = "Hello! How can I help?"
                 if callback: callback(answer)
                 return answer, [], intent
 
-            # ---------- SMALL TALK MODE ----------
+            # ---------- SMALL TALK MODE – NEUTRAL, UNLESS IT'S A LOCATION QUESTION (HANDLED BY BUSINESS MODE) ----------
             if intent == "small_talk" and confidence > 0.7:
-                prompt = f"""You are a Wasla Solutions AI assistant. Be helpful and brief.
-Response (1-2 sentences): {query}"""
-                try:
-                    answer = self.safe_llm_invoke(prompt)
-                except:
-                    answer = "I'm here to help with business strategy, digital transformation, and AI implementation questions."
-                if callback: callback(answer)
-                return answer, [], intent
+                q_lower = query.lower()
+                # If it's a location question, let business mode handle it (with retrieval)
+                if any(phrase in q_lower for phrase in ["where are you", "your location", "headquarters", "based"]):
+                    pass  # fall through to business mode
+                else:
+                    prompt = f"""You are a helpful assistant.
+One short sentence. Do not mention any company details.
 
-            # ---------- BUSINESS MODE ----------
+User: {query}
+Response:"""
+                    try:
+                        answer = self.safe_llm_invoke(prompt)
+                    except:
+                        answer = "I'm here to help with questions about our documents."
+                    if callback: callback(answer)
+                    return answer, [], intent
+
+            # ---------- BUSINESS MODE – STRICT RAG ONLY ----------
             try:
                 docs = retriever.get_relevant_documents(query)[:3]
-                context = self.summarize_chunks(docs) if docs else ""
+                
+                # If no documents retrieved, immediately say "I don't know"
+                if not docs:
+                    answer = "I don't have information about that in my knowledge base."
+                    if callback: callback(answer)
+                    return answer, [], intent
+                
+                # Use raw context preview (no LLM summarisation)
+                context = self.summarize_chunks(docs)
+                
                 is_repeat, repeat_count = self.check_repetition(query)
                 
                 history_context = ""
@@ -564,18 +570,16 @@ Response (1-2 sentences): {query}"""
                 except Exception as e:
                     print(f"❌ Main LLM failed: {e}. Trying cheap model...")
                     try:
-                        fallback_prompt = f"""You are a Wasla consultant. Answer concisely (max 3 sentences) without marketing fluff.
-
-User question: {query}
-
-Answer:"""
-                        answer = self.safe_llm_invoke(fallback_prompt, model="cheap")
+                        answer = self.safe_llm_invoke(prompt, model="cheap")
                     except Exception as e2:
-                        print(f"❌ Cheap LLM also failed: {e2}. Using static fallback.")
-                        answer = "I'm currently experiencing high demand. Please try again in a moment or contact us directly at info@waslasolutions.com."
+                        print(f"❌ Cheap LLM also failed: {e2}.")
+                        answer = "I don't have information about that at the moment. Please try again later."
                 
-                answer = self.add_inline_citations(answer, docs)
+                # Only add citations if we actually answered something
+                if answer and "I don't have information" not in answer:
+                    answer = self.add_inline_citations(answer, docs)
                 
+                # Store history
                 q_emb = self.embed_model.encode(query, convert_to_tensor=True)
                 self.history.append((query, answer, q_emb, timestamp))
                 if len(self.history) > 30:
