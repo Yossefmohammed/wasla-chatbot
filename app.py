@@ -289,7 +289,6 @@ def load_llm():
         st.info("Please check your Groq API key in Streamlit secrets or .env file.")
         st.stop()
     
-    # ✅ Supported, non‑decommissioned model
     model_name = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
     
     return ChatGroq(
@@ -315,18 +314,15 @@ def retry(max_retries=5, delay=3):
                     last_exception = e
                     err_str = str(e).lower()
                     
-                    # 🚫 Do NOT retry on client errors – fail fast
                     if any(x in err_str for x in ["400", "401", "403", "404", "invalid api key", "not found", "model not found"]):
                         raise
                     
-                    # ✅ Retry on rate limit or server errors
                     if "429" in err_str or "rate limit" in err_str or "500" in err_str or "503" in err_str:
                         wait = delay * (2 ** i) + random.uniform(0, 0.5)
                         print(f"⚠️ LLM call failed (attempt {i+1}/{max_retries}): {e}. Retrying in {wait:.1f}s")
                         time.sleep(wait)
                         continue
                     
-                    # Other errors (network, timeout) – retry
                     wait = delay * (2 ** i) + random.uniform(0, 0.5)
                     print(f"⚠️ LLM call failed (attempt {i+1}/{max_retries}): {e}. Retrying in {wait:.1f}s")
                     time.sleep(wait)
@@ -336,14 +332,14 @@ def retry(max_retries=5, delay=3):
     return decorator
 
 # ===============================
-# ENHANCED SMART RAG SYSTEM – STRICT DOCUMENT‑ONLY
+# ENHANCED SMART RAG SYSTEM – STRICT DOCUMENT‑ONLY + CREATIVE
 # ===============================
 def load_qa_chain():
     llm = load_llm()
     db = load_vectorstore()
     retriever = db.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 3}  # Reduce to 2 or 1 for even faster responses
+        search_kwargs={"k": 3}
     )
     
     cheap_llm = ChatGroq(
@@ -423,7 +419,7 @@ def load_qa_chain():
                         is_repeat = True
             return is_repeat, similar_count
         
-        # ---------- STRICT PROMPT – ONLY FROM CONTEXT ----------
+        # ---------- STRICT PROMPT – ONLY FROM CONTEXT + CREATIVITY RULES ----------
         def generate_prompt(self, query, context, history_context="", 
                            repeat=False, repeat_count=0):
             
@@ -433,13 +429,19 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 1. ONLY use information from the provided CONTEXT section.
 2. If the CONTEXT does NOT contain the answer, say ONLY:
    "I don't have information about that in my knowledge base."
+   (If the context has partial information, state what is known first, then acknowledge the gap.)
 3. NEVER use your own knowledge, training data, or any external information.
 4. NEVER mention Wasla's location, team size, founding date, or any other fact unless it appears in the CONTEXT.
 5. Always refer to Wasla Solutions as "we", "us", or "our".
 6. Maximum 5 sentences.
 7. End with ONE focused follow-up question (only if you actually answered something).
-8. Be warm, conversational, and helpful – like a senior consultant, not a robot.
-9. Use natural language, vary sentence structure, and avoid repetitive phrasing."""
+
+🔥 CREATIVITY & ENGAGEMENT RULES (CRITICAL FOR USER FEEDBACK):
+8. Be warm, conversational, and enthusiastic – like a senior consultant who genuinely loves their work.
+9. Vary your sentence structure and vocabulary – do NOT repeat the same phrases across different answers.
+10. Use rhetorical questions, mild emphasis, and confident language (e.g., "Great question!", "Exactly!", "Here's what I'd suggest…").
+11. Never sound like a robot – avoid bullet points, numbered lists, or overly formal phrasing unless it's a direct quote from context.
+12. If you are repeating an answer (repeat=True), you MUST use completely different wording and offer a fresh angle or example – never copy the previous response."""
 
             if repeat_count >= 2:
                 return f"""{base_instruction}
@@ -449,10 +451,10 @@ The user has asked about this topic multiple times. Do NOT repeat previous answe
 Previous answers:
 {history_context}
 
-Instead:
-1. Acknowledge we've discussed this
-2. Offer ONE new angle or deeper insight (ONLY from CONTEXT)
-3. Ask a specific, more advanced follow-up question
+STRONG INSTRUCTION:
+- Acknowledge we've covered this.
+- Offer ONE completely new angle, insight, or example (ONLY from CONTEXT).
+- Ask a specific, more advanced follow-up question.
 
 Question: {query}
 
@@ -465,10 +467,10 @@ The user is asking a similar question again.
 Previous answers:
 {history_context}
 
-Provide a fresh perspective:
-- Use completely different wording
-- Add a new example or angle (ONLY from CONTEXT)
-- Keep it concise (3-4 sentences)
+STRONG INSTRUCTION:
+- Use completely different wording – do not reuse phrases from previous answers.
+- Add a new example, metaphor, or perspective (ONLY from CONTEXT).
+- Keep it concise (3-4 sentences).
 
 Question: {query}
 
@@ -498,38 +500,65 @@ Consultant response:"""
                     seen.add(source_name)
             return answer + "\n".join(citation_lines)
         
-        # ---------- MAIN CALL – FULLY GROUNDED, NO HALLUCINATIONS ----------
+        # ---------- MAIN CALL – STRICT GREETING DETECTION, VARIETY, "HOW ARE YOU" HANDLER ----------
         def __call__(self, query, callback=None):
             intent, confidence = self.detect_intent(query)
             timestamp = datetime.now().isoformat()
+            q_lower = query.lower().strip()
+            words = q_lower.split()
             
-            # ---------- GREETING MODE – BRANDED, WELCOMING ----------
-            if intent == "greeting" and confidence > 0.7:
+            # ---------- GREETING MODE – ONLY TRIGGER FOR ACTUAL GREETINGS ----------
+            # Strict rule: only if query is essentially a greeting (≤3 words and high confidence)
+            if intent == "greeting" and confidence > 0.7 and len(words) <= 3:
+                # Special handler for "how are you" – brief, friendly, varies
+                if any(phrase in q_lower for phrase in ["how are you", "how's it going", "how are things"]):
+                    prompts = [
+                        "We're doing well, thank you! How can we assist you today?",
+                        "All good here, thanks for asking! What can we help you with?",
+                        "Doing great – ready to tackle some digital challenges. What's on your mind?"
+                    ]
+                    answer = random.choice(prompts)
+                    if callback: callback(answer)
+                    return answer, [], intent
+                
+                # Generic greeting – vary response each time
                 prompt = f"""You are the digital front desk of Wasla Solutions.
-Be warm, brief, and professional. Maximum 7 words. Do not mention being an AI.
+Be warm, brief, and professional. Maximum 7 words. 
+Vary your greeting – do not repeat the same phrase.
+Do not mention being an AI.
 
 User: {query}
 Response:"""
                 try:
                     answer = self.safe_llm_invoke(prompt)
                     if len(answer.split()) > 8:
-                        answer = "Wasla Solutions – how can we help you today?"
+                        answer = random.choice([
+                            "Wasla Solutions – how can we help?",
+                            "Welcome to Wasla! What can we do for you?",
+                            "Hi there – Wasla here, ready to help."
+                        ])
                 except:
-                    answer = "Wasla Solutions – how can we help you today?"
+                    answer = random.choice([
+                        "Wasla Solutions – how can we help?",
+                        "Welcome to Wasla! How may we assist?",
+                        "Hi! Wasla here – what can we do for you today?"
+                    ])
                 if callback: callback(answer)
                 return answer, [], intent
 
             # ---------- SMALL TALK MODE – BRANDED FOR IDENTITY, NEUTRAL FOR OTHERS ----------
             if intent == "small_talk" and confidence > 0.7:
-                q_lower = query.lower()
-                
-                # 🚩 Branded answer for "who are you / what can you do"
+                # Branded answer for "who are you / what can you do"
                 if any(phrase in q_lower for phrase in ["who are you", "what are you", "what can you do", "your name"]):
-                    answer = "We are Wasla Solutions – a digital strategy consultancy. We specialise in AI, digital transformation, and growth strategy. How can we help you today?"
+                    answer = random.choice([
+                        "We're Wasla Solutions – a digital strategy consultancy. We specialise in AI, digital transformation, and growth strategy. How can we help you today?",
+                        "Great question! We're Wasla Solutions, your digital strategy partner. We help businesses leverage AI, transform digitally, and scale. What brings you here?",
+                        "We're Wasla – a team of digital strategists. Think of us as your co‑pilot for AI, digital products, and business growth. What challenges are you facing?"
+                    ])
                     if callback: callback(answer)
                     return answer, [], intent
                 
-                # Location questions → handled by business mode (RAG) if documents contain location
+                # Location questions → handled by business mode (RAG)
                 if any(phrase in q_lower for phrase in ["where are you", "your location", "headquarters", "based"]):
                     pass  # fall through to business mode
                 
@@ -537,6 +566,7 @@ Response:"""
                 else:
                     prompt = f"""You are a helpful assistant.
 One short sentence. Do not mention any company details.
+Be friendly and natural.
 
 User: {query}
 Response:"""
@@ -551,15 +581,12 @@ Response:"""
             try:
                 docs = retriever.get_relevant_documents(query)[:3]
                 
-                # If no documents retrieved, immediately say "I don't know"
                 if not docs:
                     answer = "I don't have information about that in my knowledge base."
                     if callback: callback(answer)
                     return answer, [], intent
                 
-                # Use raw context preview (no LLM summarisation)
                 context = self.summarize_chunks(docs)
-                
                 is_repeat, repeat_count = self.check_repetition(query)
                 
                 history_context = ""
@@ -577,7 +604,7 @@ Response:"""
                 
                 answer = None
                 try:
-                    answer = self.safe_llm_invoke(prompt)  # main model
+                    answer = self.safe_llm_invoke(prompt)
                 except Exception as e:
                     print(f"❌ Main LLM failed: {e}. Trying cheap model...")
                     try:
@@ -586,11 +613,9 @@ Response:"""
                         print(f"❌ Cheap LLM also failed: {e2}.")
                         answer = "I don't have information about that at the moment. Please try again later."
                 
-                # Only add citations if we actually answered something
                 if answer and "I don't have information" not in answer:
                     answer = self.add_inline_citations(answer, docs)
                 
-                # Store history
                 q_emb = self.embed_model.encode(query, convert_to_tensor=True)
                 self.history.append((query, answer, q_emb, timestamp))
                 if len(self.history) > 30:
