@@ -307,7 +307,7 @@ def retry(max_retries=3, delay=1):
     return decorator
 
 # ===============================
-# ENHANCED SMART RAG SYSTEM (PRODUCTION READY)
+# ENHANCED SMART RAG SYSTEM (FULLY FIXED)
 # ===============================
 def load_qa_chain():
     """Load the enhanced QA chain with all improvements"""
@@ -315,10 +315,10 @@ def load_qa_chain():
     db = load_vectorstore()
     retriever = db.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 3}  # REDUCED from 5 → 3 to save tokens
+        search_kwargs={"k": 3}  # Retrieve only top 3 chunks
     )
     
-    # Cheaper model for summarisation
+    # Cheaper model for summarisation – will be passed to the class
     cheap_llm = ChatGroq(
         model="llama3-8b-8192",
         temperature=0.3,
@@ -327,25 +327,27 @@ def load_qa_chain():
     )
     
     class EnhancedSmartRAG:
-        def __init__(self):
+        def __init__(self, cheap_llm):
             self.history = []
             self.embed_model = SentenceTransformer(
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
             self.greetings_db = self._load_greetings()
+            self.cheap_llm = cheap_llm   # ✅ store cheap model
+            self.main_llm = llm          # ✅ store main model
         
         # ---------------------------
         # Retry‑enabled LLM call
         # ---------------------------
         @retry(max_retries=3, delay=2)
         def safe_llm_invoke(self, prompt, model="main"):
-            """Call LLM with retry logic. Use cheaper model for summarisation."""
+            """Call LLM with retry logic."""
             if model == "cheap":
-                return cheap_llm.invoke(prompt).content
-            return llm.invoke(prompt).content
+                return self.cheap_llm.invoke(prompt).content
+            return self.main_llm.invoke(prompt).content
         
         # ---------------------------
-        # Enhanced Intent Detection
+        # Intent Detection
         # ---------------------------
         def _load_greetings(self):
             return [
@@ -379,15 +381,14 @@ def load_qa_chain():
             return "business", 0.8
         
         # ---------------------------
-        # Optimised Summarization (only top 2 docs, cheap model)
+        # Optimised Summarization (cheap model, fallback to raw text)
         # ---------------------------
         def summarize_chunks(self, docs):
             if not docs:
                 return "No relevant documents found."
             
             summaries = []
-            # Only summarise the first 2 most relevant chunks
-            for i, d in enumerate(docs[:2]):
+            for i, d in enumerate(docs[:2]):  # only top 2 chunks
                 source = d.metadata.get('source', 'Unknown')
                 source_name = os.path.basename(source) if source != 'Unknown' else f'Document {i+1}'
                 
@@ -405,15 +406,18 @@ Requirements:
 Key insights:"""
                 
                 try:
+                    # ✅ use self.cheap_llm via safe_llm_invoke
                     summary = self.safe_llm_invoke(prompt, model="cheap")
                     summaries.append(f"[{source_name}] {summary.strip()}")
-                except Exception:
+                except Exception as e:
+                    # Fallback: show first 100 characters
+                    print(f"⚠️ Summarisation failed for {source_name}: {e}")
                     summaries.append(f"[{source_name}] {d.page_content[:100]}...")
             
             return "\n".join(summaries)
         
         # ---------------------------
-        # Repetition Detection (unchanged)
+        # Repetition Detection
         # ---------------------------
         def check_repetition(self, query) -> Tuple[bool, int]:
             if not self.history:
@@ -436,7 +440,7 @@ Key insights:"""
             return is_repeat, similar_count
         
         # ---------------------------
-        # Prompt Generation (unchanged)
+        # Prompt Generation
         # ---------------------------
         def generate_prompt(self, query, context, history_context="", 
                            repeat=False, repeat_count=0):
@@ -500,7 +504,7 @@ User question:
 Consultant response:"""
         
         # ---------------------------
-        # Inline Citations (unchanged)
+        # Inline Citations
         # ---------------------------
         def add_inline_citations(self, answer: str, docs: List) -> str:
             if not docs:
@@ -518,7 +522,7 @@ Consultant response:"""
             return answer + "\n".join(citation_lines)
         
         # ---------------------------
-        # Main Call – Fully Optimised
+        # Main Call – Fully Fixed
         # ---------------------------
         def __call__(self, query, callback=None):
             intent, confidence = self.detect_intent(query)
@@ -551,9 +555,9 @@ Response (1-2 sentences): {query}"""
                 if callback: callback(answer)
                 return answer, [], intent
 
-            # ---------- BUSINESS MODE (Fully Protected) ----------
+            # ---------- BUSINESS MODE ----------
             try:
-                # Retrieve only top 3 docs (was 5)
+                # Retrieve only top 3 docs
                 docs = retriever.get_relevant_documents(query)[:3]
                 
                 # Summarise only top 2 docs using cheap model
@@ -562,10 +566,10 @@ Response (1-2 sentences): {query}"""
                 # Repetition check
                 is_repeat, repeat_count = self.check_repetition(query)
                 
-                # Conversation history – only last 2 turns, truncated
+                # Conversation history – last 2 turns, truncated
                 history_context = ""
                 if self.history:
-                    recent = self.history[-2:]  # REDUCED from 3 → 2
+                    recent = self.history[-2:]
                     history_context = "Previous conversation:\n"
                     for q, a, _, _ in recent:
                         a_short = a[:200] + "…" if len(a) > 200 else a
@@ -583,19 +587,19 @@ Response (1-2 sentences): {query}"""
                 # Add citations
                 answer = self.add_inline_citations(answer, docs)
                 
-                # Store history (limited to 30)
+                # Store history
                 q_emb = self.embed_model.encode(query, convert_to_tensor=True)
                 self.history.append((query, answer, q_emb, timestamp))
-                if len(self.history) > 30:   # REDUCED from 50 → 30
+                if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
                 if callback: callback(answer)
                 return answer, docs, intent
                 
             except Exception as e:
-                # Log FULL error to Streamlit Cloud logs
-                print("❌ BUSINESS MODE EXCEPTION:")
-                print(traceback.format_exc())
+                # 🔥 CRITICAL: Log the FULL error to Streamlit Cloud logs
+                print("❌ BUSINESS MODE EXCEPTION (FIXED VERSION):")
+                traceback.print_exc()
                 
                 # User‑friendly message
                 if "rate limit" in str(e).lower() or "429" in str(e):
@@ -604,7 +608,8 @@ Response (1-2 sentences): {query}"""
                     error_msg = "I encountered an issue. Please try again or rephrase."
                 return error_msg, [], intent
     
-    return EnhancedSmartRAG()
+    # ✅ Pass cheap_llm to the class
+    return EnhancedSmartRAG(cheap_llm)
 
 # ===============================
 # ENHANCED DATA PERSISTENCE
@@ -655,7 +660,7 @@ def save_feedback(question, feedback_type):
         writer.writerow([timestamp, question, feedback_type])
 
 # ===============================
-# SIDEBAR COMPONENTS (unchanged)
+# SIDEBAR COMPONENTS
 # ===============================
 def render_sidebar():
     with st.sidebar:
@@ -715,7 +720,7 @@ def render_sidebar():
             )
 
 # ===============================
-# MAIN CHAT INTERFACE (unchanged)
+# MAIN CHAT INTERFACE
 # ===============================
 def main():
     init_session_state()
