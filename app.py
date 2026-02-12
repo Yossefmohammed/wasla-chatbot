@@ -4,10 +4,12 @@ import csv
 import gc
 import hashlib
 import json
+import time
+import traceback
 from datetime import datetime
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, Tuple
-from pathlib import Path
+from functools import wraps
 
 # ===============================
 # ENV & INIT
@@ -284,7 +286,28 @@ def load_llm():
     )
 
 # ===============================
-# ENHANCED SMART RAG SYSTEM (WITH ALL IMPROVEMENTS)
+# RETRY DECORATOR
+# ===============================
+def retry(max_retries=3, delay=1):
+    """Exponential backoff retry decorator"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for i in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if "rate limit" in str(e).lower() or "429" in str(e):
+                        wait = delay * (2 ** i)
+                        time.sleep(wait)
+                        continue
+                    raise
+            raise Exception(f"Max retries ({max_retries}) exceeded")
+        return wrapper
+    return decorator
+
+# ===============================
+# ENHANCED SMART RAG SYSTEM (PRODUCTION READY)
 # ===============================
 def load_qa_chain():
     """Load the enhanced QA chain with all improvements"""
@@ -292,7 +315,15 @@ def load_qa_chain():
     db = load_vectorstore()
     retriever = db.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 5}
+        search_kwargs={"k": 3}  # REDUCED from 5 → 3 to save tokens
+    )
+    
+    # Cheaper model for summarisation
+    cheap_llm = ChatGroq(
+        model="llama3-8b-8192",
+        temperature=0.3,
+        groq_api_key=os.getenv("GROQ_API_KEY"),
+        max_tokens=256
     )
     
     class EnhancedSmartRAG:
@@ -302,6 +333,16 @@ def load_qa_chain():
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
             self.greetings_db = self._load_greetings()
+        
+        # ---------------------------
+        # Retry‑enabled LLM call
+        # ---------------------------
+        @retry(max_retries=3, delay=2)
+        def safe_llm_invoke(self, prompt, model="main"):
+            """Call LLM with retry logic. Use cheaper model for summarisation."""
+            if model == "cheap":
+                return cheap_llm.invoke(prompt).content
+            return llm.invoke(prompt).content
         
         # ---------------------------
         # Enhanced Intent Detection
@@ -338,14 +379,15 @@ def load_qa_chain():
             return "business", 0.8
         
         # ---------------------------
-        # Summarization with Source Labels
+        # Optimised Summarization (only top 2 docs, cheap model)
         # ---------------------------
         def summarize_chunks(self, docs):
             if not docs:
                 return "No relevant documents found."
             
             summaries = []
-            for i, d in enumerate(docs):
+            # Only summarise the first 2 most relevant chunks
+            for i, d in enumerate(docs[:2]):
                 source = d.metadata.get('source', 'Unknown')
                 source_name = os.path.basename(source) if source != 'Unknown' else f'Document {i+1}'
                 
@@ -363,7 +405,7 @@ Requirements:
 Key insights:"""
                 
                 try:
-                    summary = llm.invoke(prompt).content
+                    summary = self.safe_llm_invoke(prompt, model="cheap")
                     summaries.append(f"[{source_name}] {summary.strip()}")
                 except Exception:
                     summaries.append(f"[{source_name}] {d.page_content[:100]}...")
@@ -371,14 +413,9 @@ Key insights:"""
             return "\n".join(summaries)
         
         # ---------------------------
-        # FIX 2: Better Repetition Detection (lower threshold + count)
+        # Repetition Detection (unchanged)
         # ---------------------------
         def check_repetition(self, query) -> Tuple[bool, int]:
-            """
-            Returns (is_repeat, similarity_count)
-            - is_repeat: True if the most similar question exceeds threshold
-            - similarity_count: number of highly similar questions in last 8
-            """
             if not self.history:
                 return False, 0
             
@@ -388,31 +425,22 @@ Key insights:"""
             
             for i, (prev_q, _, prev_emb, _) in enumerate(self.history[-8:]):
                 similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
-                
-                # Lowered threshold: 0.78 + slight recency boost
                 recency_boost = 1 - (i / 20)
                 threshold = 0.78 + recency_boost
                 
                 if similarity > threshold:
                     similar_count += 1
-                    if similarity > 0.85:  # very high similarity -> definitely repeat
+                    if similarity > 0.85:
                         is_repeat = True
             
             return is_repeat, similar_count
         
         # ---------------------------
-        # FIX 3 & 4: System Prompt with Identity & Boilerplate Ban
+        # Prompt Generation (unchanged)
         # ---------------------------
         def generate_prompt(self, query, context, history_context="", 
                            repeat=False, repeat_count=0):
-            """
-            Generate prompt with:
-            - "we/us/our" identity enforcement
-            - ban on overused phrase "Each project is assessed..."
-            - redirect mode for multiple repeats
-            """
             
-            # Base identity and tone instructions
             base_instruction = """You are a senior digital strategy consultant at Wasla Solutions.
 
 CRITICAL IDENTITY RULE: Always refer to Wasla Solutions as "we", "us", or "our". NEVER use "they", "the company", or "Wasla" as a third party.
@@ -425,7 +453,6 @@ STRICT RULES:
 - Use context only if directly relevant
 - NEVER use the phrase "Each project is assessed properly after a direct conversation with the team" or any close variation."""
 
-            # Redirect mode for 2+ repeats
             if repeat_count >= 2:
                 return f"""{base_instruction}
 
@@ -443,7 +470,6 @@ Question: {query}
 
 Consultant response:"""
             
-            # Standard repeat mode (first repeat)
             if repeat:
                 return f"""{base_instruction}
 
@@ -461,7 +487,6 @@ Question: {query}
 
 New answer:"""
             
-            # Normal business mode
             return f"""{base_instruction}
 
 {history_context}
@@ -475,10 +500,9 @@ User question:
 Consultant response:"""
         
         # ---------------------------
-        # FIX 5: Inline Citations
+        # Inline Citations (unchanged)
         # ---------------------------
         def add_inline_citations(self, answer: str, docs: List) -> str:
-            """Append source citations to the answer."""
             if not docs:
                 return answer
             
@@ -494,13 +518,13 @@ Consultant response:"""
             return answer + "\n".join(citation_lines)
         
         # ---------------------------
-        # Main Call with All Fixes
+        # Main Call – Fully Optimised
         # ---------------------------
         def __call__(self, query, callback=None):
             intent, confidence = self.detect_intent(query)
             timestamp = datetime.now().isoformat()
             
-            # ---------- GREETING MODE (FIX 1: Concise) ----------
+            # ---------- GREETING MODE ----------
             if intent == "greeting" and confidence > 0.7:
                 prompt = f"""You are a friendly, concise consultant.
 STRICT RULE: Maximum 10 words. No fluff.
@@ -508,72 +532,76 @@ STRICT RULE: Maximum 10 words. No fluff.
 User: {query}
 Response:"""
                 try:
-                    answer = llm.invoke(prompt).content
-                    # Enforce length limit
-                    words = answer.split()
-                    if len(words) > 12:
+                    answer = self.safe_llm_invoke(prompt)
+                    if len(answer.split()) > 12:
                         answer = "Hello! How can I help you today?"
                 except:
                     answer = "Hello! How can I help you today?"
-                
-                if callback:
-                    callback(answer)
+                if callback: callback(answer)
                 return answer, [], intent
-            
+
             # ---------- SMALL TALK MODE ----------
             if intent == "small_talk" and confidence > 0.7:
                 prompt = f"""You are a Wasla Solutions AI assistant. Be helpful and brief.
 Response (1-2 sentences): {query}"""
                 try:
-                    answer = llm.invoke(prompt).content
+                    answer = self.safe_llm_invoke(prompt)
                 except:
                     answer = "I'm here to help with business strategy, digital transformation, and AI implementation questions."
-                
-                if callback:
-                    callback(answer)
+                if callback: callback(answer)
                 return answer, [], intent
-            
-            # ---------- BUSINESS MODE ----------
+
+            # ---------- BUSINESS MODE (Fully Protected) ----------
             try:
-                docs = retriever.get_relevant_documents(query)
+                # Retrieve only top 3 docs (was 5)
+                docs = retriever.get_relevant_documents(query)[:3]
+                
+                # Summarise only top 2 docs using cheap model
                 context = self.summarize_chunks(docs) if docs else ""
                 
-                # Enhanced repetition check
+                # Repetition check
                 is_repeat, repeat_count = self.check_repetition(query)
                 
-                # Build conversation history
+                # Conversation history – only last 2 turns, truncated
                 history_context = ""
                 if self.history:
-                    recent = self.history[-3:]
+                    recent = self.history[-2:]  # REDUCED from 3 → 2
                     history_context = "Previous conversation:\n"
                     for q, a, _, _ in recent:
-                        history_context += f"Q: {q}\nA: {a}\n\n"
+                        a_short = a[:200] + "…" if len(a) > 200 else a
+                        history_context += f"Q: {q}\nA: {a_short}\n\n"
                 
-                # Generate prompt with all improvements
+                # Generate prompt
                 prompt = self.generate_prompt(
                     query, context, history_context, 
                     repeat=is_repeat, repeat_count=repeat_count
                 )
                 
-                answer = llm.invoke(prompt).content
+                # Main LLM call with retry
+                answer = self.safe_llm_invoke(prompt)
                 
-                # Add inline citations
+                # Add citations
                 answer = self.add_inline_citations(answer, docs)
                 
-                # Store in history
+                # Store history (limited to 30)
                 q_emb = self.embed_model.encode(query, convert_to_tensor=True)
                 self.history.append((query, answer, q_emb, timestamp))
+                if len(self.history) > 30:   # REDUCED from 50 → 30
+                    self.history = self.history[-30:]
                 
-                if len(self.history) > 50:
-                    self.history = self.history[-50:]
-                
-                if callback:
-                    callback(answer)
-                
+                if callback: callback(answer)
                 return answer, docs, intent
                 
             except Exception as e:
-                error_msg = "I encountered an issue. Please try again or rephrase."
+                # Log FULL error to Streamlit Cloud logs
+                print("❌ BUSINESS MODE EXCEPTION:")
+                print(traceback.format_exc())
+                
+                # User‑friendly message
+                if "rate limit" in str(e).lower() or "429" in str(e):
+                    error_msg = "We're receiving many requests – please wait a moment and try again."
+                else:
+                    error_msg = "I encountered an issue. Please try again or rephrase."
                 return error_msg, [], intent
     
     return EnhancedSmartRAG()
@@ -619,7 +647,6 @@ def save_feedback(question, feedback_type):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     os.makedirs("data", exist_ok=True)
     
-    # FIX 6: Typo correction
     file_exists = os.path.isfile("data/feedback.csv")
     with open("data/feedback.csv", "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -628,7 +655,7 @@ def save_feedback(question, feedback_type):
         writer.writerow([timestamp, question, feedback_type])
 
 # ===============================
-# SIDEBAR COMPONENTS
+# SIDEBAR COMPONENTS (unchanged)
 # ===============================
 def render_sidebar():
     with st.sidebar:
@@ -688,7 +715,7 @@ def render_sidebar():
             )
 
 # ===============================
-# MAIN CHAT INTERFACE
+# MAIN CHAT INTERFACE (unchanged)
 # ===============================
 def main():
     init_session_state()
