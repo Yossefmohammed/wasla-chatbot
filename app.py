@@ -43,10 +43,18 @@ from langchain_community.document_loaders import (
     CSVLoader,
     UnstructuredWordDocumentLoader,
     UnstructuredPowerPointLoader,
-    WebBaseLoader
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from constant import CHROMA_SETTINGS
+
+# Handle constant import gracefully
+try:
+    from constant import CHROMA_SETTINGS
+except ImportError:
+    from dataclasses import dataclass
+    @dataclass
+    class CHROMA_SETTINGS:
+        persist_directory: str = "./chroma_db"
+
 from sentence_transformers import SentenceTransformer, util
 
 # ===============================
@@ -98,12 +106,17 @@ def set_dark_theme():
         padding: 0.6rem 1.2rem !important;
         font-weight: 600 !important;
         transition: transform 0.2s, box-shadow 0.2s !important;
-        width: 100%;
     }
     
     button:hover {
         transform: translateY(-2px);
         box-shadow: 0 8px 20px rgba(37, 99, 235, 0.3) !important;
+    }
+    
+    /* Sidebar button specific */
+    section[data-testid="stSidebar"] button {
+        width: 100%;
+        margin: 0.2rem 0;
     }
     
     /* Cards for chat history */
@@ -174,6 +187,11 @@ def init_session_state():
     
     if "current_sources" not in st.session_state:
         st.session_state.current_sources = []
+    
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = hashlib.md5(
+            str(datetime.now().timestamp()).encode()
+        ).hexdigest()
 
 # ===============================
 # ENHANCED VECTOR STORE WITH MULTI-FORMAT SUPPORT
@@ -281,7 +299,7 @@ def load_documents_to_vectorstore(embeddings, persist_dir):
 def load_llm():
     """Load LLM with streaming support"""
     if ChatGroq is None:
-        raise RuntimeError("langchain-groq not installed")
+        raise RuntimeError("langchain-groq not installed. Please install it with: pip install langchain-groq")
     
     return ChatGroq(
         model=os.getenv("GROQ_MODEL", "llama3-70b-8192"),
@@ -333,7 +351,7 @@ def load_qa_chain():
                 return "greeting", 1.0
             
             # Check for partial matches in greetings
-            for greeting in self.greetings_db[:10]:  # Check common ones first
+            for greeting in self.greetings_db[:10]:
                 if greeting in q:
                     return "greeting", 0.9
             
@@ -363,7 +381,7 @@ def load_qa_chain():
             for i, d in enumerate(docs):
                 # Get source filename
                 source = d.metadata.get('source', 'Unknown')
-                source_name = os.path.basename(source) if source != 'Unknown' else 'Document'
+                source_name = os.path.basename(source) if source != 'Unknown' else f'Document {i+1}'
                 
                 prompt = f"""You are an expert consultant. Extract ONLY the key business insights from this text.
 
@@ -378,8 +396,11 @@ Requirements:
 
 Key insights:"""
                 
-                summary = llm.predict(prompt)
-                summaries.append(f"[{source_name}] {summary.strip()}")
+                try:
+                    summary = llm.invoke(prompt).content
+                    summaries.append(f"[{source_name}] {summary.strip()}")
+                except Exception as e:
+                    summaries.append(f"[{source_name}] {d.page_content[:100]}...")
             
             return "\n".join(summaries)
         
@@ -394,11 +415,11 @@ Key insights:"""
             q_emb = self.embed_model.encode(query, convert_to_tensor=True)
             
             # Check last 10 questions with decreasing threshold
-            for i, (_, _, prev_emb, timestamp) in enumerate(self.history[-10:]):
+            for i, (_, _, prev_emb, _) in enumerate(self.history[-10:]):
                 similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
                 
                 # More recent questions get stricter threshold
-                recency_boost = 1 - (i / 20)  # Recent questions get +0.05 threshold
+                recency_boost = 1 - (i / 20)
                 threshold = 0.85 + recency_boost
                 
                 if similarity > threshold:
@@ -461,7 +482,10 @@ Consultant response:"""
 User: {query}
 
 Response:"""
-                answer = llm.predict(prompt)
+                try:
+                    answer = llm.invoke(prompt).content
+                except:
+                    answer = "Hello! How can I help you today?"
                 
                 if callback:
                     callback(answer)
@@ -475,7 +499,10 @@ Response:"""
 User: {query}
 
 Response (1-2 sentences):"""
-                answer = llm.predict(prompt)
+                try:
+                    answer = llm.invoke(prompt).content
+                except:
+                    answer = "I'm here to help with business strategy, digital transformation, and AI implementation questions."
                 
                 if callback:
                     callback(answer)
@@ -483,41 +510,46 @@ Response (1-2 sentences):"""
                 return answer, [], intent
             
             # BUSINESS MODE
-            # Get relevant documents
-            docs = retriever.get_relevant_documents(query)
-            
-            # Summarize context
-            context = self.summarize_chunks(docs) if docs else ""
-            
-            # Check for repetition
-            repeat = self.is_repeat_question(query)
-            
-            # Build conversation history
-            history_context = ""
-            if self.history:
-                recent = self.history[-3:]
-                history_context = "Previous conversation:\n"
-                for q, a, _, _ in recent:
-                    history_context += f"Q: {q}\nA: {a}\n\n"
-            
-            # Generate prompt
-            prompt = self.generate_prompt(query, context, history_context, repeat)
-            
-            # Get answer (non-streaming for now to keep simple)
-            answer = llm.predict(prompt)
-            
-            # Store in history
-            q_emb = self.embed_model.encode(query, convert_to_tensor=True)
-            self.history.append((query, answer, q_emb, timestamp))
-            
-            # Keep history manageable
-            if len(self.history) > 50:
-                self.history = self.history[-50:]
-            
-            if callback:
-                callback(answer)
-            
-            return answer, docs, intent
+            try:
+                # Get relevant documents
+                docs = retriever.get_relevant_documents(query)
+                
+                # Summarize context
+                context = self.summarize_chunks(docs) if docs else ""
+                
+                # Check for repetition
+                repeat = self.is_repeat_question(query)
+                
+                # Build conversation history
+                history_context = ""
+                if self.history:
+                    recent = self.history[-3:]
+                    history_context = "Previous conversation:\n"
+                    for q, a, _, _ in recent:
+                        history_context += f"Q: {q}\nA: {a}\n\n"
+                
+                # Generate prompt
+                prompt = self.generate_prompt(query, context, history_context, repeat)
+                
+                # Get answer
+                answer = llm.invoke(prompt).content
+                
+                # Store in history
+                q_emb = self.embed_model.encode(query, convert_to_tensor=True)
+                self.history.append((query, answer, q_emb, timestamp))
+                
+                # Keep history manageable
+                if len(self.history) > 50:
+                    self.history = self.history[-50:]
+                
+                if callback:
+                    callback(answer)
+                
+                return answer, docs, intent
+                
+            except Exception as e:
+                error_msg = f"I encountered an issue while processing your request. Please try again or rephrase your question."
+                return error_msg, [], intent
     
     return EnhancedSmartRAG()
 
@@ -547,7 +579,7 @@ def save_conversation(question, answer, intent="business", feedback=None):
         "answer": answer,
         "intent": intent,
         "feedback": feedback,
-        "session_id": hashlib.md5(str(st.session_state.get("session_id", "")).encode()).hexdigest()
+        "session_id": st.session_state.get("session_id", "")
     }
     
     try:
@@ -571,7 +603,7 @@ def save_feedback(question, feedback_type):
     
     os.makedirs("data", exist_ok=True)
     
-    file_exists = os.path.isfile("data/feedback.csv")
+    file_exists = os.isfile("data/feedback.csv")
     with open("data/feedback.csv", "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if not file_exists:
@@ -621,9 +653,10 @@ def render_sidebar():
         col1, col2 = st.columns(2)
         
         with col1:
+            user_messages = [m for m in st.session_state.messages if m.get("role") == "user"]
             st.metric(
                 "Questions",
-                len([m for m in st.session_state.messages if m["role"] == "user"])
+                len(user_messages)
             )
         
         with col2:
@@ -641,13 +674,19 @@ def render_sidebar():
             st.session_state.feedback_given = set()
             st.rerun()
         
-        # Export Chat
+        # Export Chat - FIXED THE BUG HERE
         if st.session_state.messages:
-            chat_text = "\n\n".join([
-                f"Q: {m['content']}\nA: {m['response']}" 
-                for m in st.session_state.messages 
-                if m["role"] == "user"
-            ])
+            chat_entries = []
+            for m in st.session_state.messages:
+                if m["role"] == "user":
+                    # Find the corresponding assistant message
+                    chat_entries.append(f"Q: {m['content']}")
+                elif m["role"] == "assistant":
+                    # Add the last user's Q with this A
+                    if chat_entries and not chat_entries[-1].startswith("A:"):
+                        chat_entries[-1] += f"\nA: {m['content']}"
+            
+            chat_text = "\n\n".join(chat_entries)
             
             st.download_button(
                 "📥 Export Chat",
@@ -665,12 +704,6 @@ def main():
     # Initialize session
     init_session_state()
     
-    # Set session ID
-    if "session_id" not in st.session_state:
-        st.session_state.session_id = hashlib.md5(
-            str(datetime.now().timestamp()).encode()
-        ).hexdigest()
-    
     # Render sidebar
     render_sidebar()
     
@@ -682,14 +715,14 @@ def main():
     )
     
     # Display chat messages
-    for message in st.session_state.messages:
+    for idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             
             # Show sources for assistant messages
-            if message["role"] == "assistant" and "sources" in message:
+            if message["role"] == "assistant" and "sources" in message and message["sources"]:
                 with st.expander("📚 View Sources", expanded=False):
-                    for i, source in enumerate(message["sources"], 1):
+                    for i, source in enumerate(message["sources"][:3], 1):
                         source_name = os.path.basename(
                             source.metadata.get('source', f'document_{i}')
                         )
@@ -701,21 +734,22 @@ def main():
                 msg_id = message["id"]
                 
                 if msg_id not in st.session_state.feedback_given:
-                    col1, col2 = st.columns([1, 20])
+                    col1, col2, col3 = st.columns([1, 1, 20])
                     with col1:
-                        if st.button("👍", key=f"like_{msg_id}"):
+                        if st.button("👍", key=f"like_{msg_id}_{idx}"):
                             save_feedback(st.session_state.current_question, "positive")
                             st.session_state.feedback_given.add(msg_id)
                             st.rerun()
                     with col2:
-                        if st.button("👎", key=f"dislike_{msg_id}"):
+                        if st.button("👎", key=f"dislike_{msg_id}_{idx}"):
                             save_feedback(st.session_state.current_question, "negative")
                             st.session_state.feedback_given.add(msg_id)
                             st.rerun()
     
     # Chat input
-    if prompt := st.chat_input("Ask about Wasla's services, digital strategy, or business challenges..."):
-        
+    prompt = st.chat_input("Ask about Wasla's services, digital strategy, or business challenges...")
+    
+    if prompt:
         # Add user message
         st.session_state.messages.append({"role": "user", "content": prompt})
         
@@ -752,7 +786,7 @@ def main():
                 
                 # Add assistant message to history
                 message_id = hashlib.md5(
-                    f"{prompt}{datetime.now()}".encode()
+                    f"{prompt}{datetime.now()}{len(st.session_state.messages)}".encode()
                 ).hexdigest()
                 
                 st.session_state.messages.append({
