@@ -1,98 +1,66 @@
 import os
 from pathlib import Path
-from langchain_community.document_loaders import (
-    PyPDFLoader, TextLoader, CSVLoader,
-    UnstructuredWordDocumentLoader, UnstructuredPowerPointLoader
-)
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-import torch
-import shutil
-from tqdm import tqdm
+from constant import CHROMA_SETTINGS
 
-# Paths
-CHROMA_DIR = Path("./chroma_db")
-DOCS_DIR = Path("docs")
 
-# Supported file types
-LOADERS = {
-    '.pdf': PyPDFLoader,
-    '.txt': TextLoader,
-    '.csv': CSVLoader,
-    '.docx': UnstructuredWordDocumentLoader,
-    '.doc': UnstructuredWordDocumentLoader,
-    '.pptx': UnstructuredPowerPointLoader,
-    '.ppt': UnstructuredPowerPointLoader,
-}
+BASE_DIR = Path(__file__).parent
+DOCS_DIR = BASE_DIR / "docs"
+CHROMA_DIR = Path(CHROMA_SETTINGS.persist_directory)
 
-# Embedding selection based on device
-def get_embeddings():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cpu":
-        model_name = "sentence-transformers/all-MiniLM-L6-v2"  # lightweight CPU model
-    else:
-        model_name = "BAAI/bge-base-en-v1.5"  # GPU-optimized
-    embeddings = HuggingFaceEmbeddings(
-        model_name=model_name,
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    print(f"⚡ Using embeddings: {model_name} on device: {device}")
-    return embeddings
 
-def ingest_documents(force_rebuild: bool = False, chunk_size: int = 1200, chunk_overlap: int = 250):
-    # Ensure docs folder exists
-    if not DOCS_DIR.exists():
-        DOCS_DIR.mkdir(parents=True)
-        print("📁 'docs' folder created. Add your documents here and rerun the script.")
-        return None
-
-    # Clear old DB if needed
-    if CHROMA_DIR.exists() and force_rebuild:
-        print("⚠️ Clearing old Chroma DB...")
-        shutil.rmtree(CHROMA_DIR)
-
+def ingest_documents():
     all_documents = []
-    # Load documents with progress
-    for ext, loader_cls in LOADERS.items():
-        files = list(DOCS_DIR.rglob(f"*{ext}"))
-        if not files:
-            continue
-        for file_path in tqdm(files, desc=f"Loading {ext} files"):
-            try:
-                loader = loader_cls(str(file_path))
-                docs = loader.load()
-                all_documents.extend(docs)
-            except Exception as e:
-                print(f"❌ Failed to load {file_path.name}: {e}")
+
+    if not DOCS_DIR.exists():
+        raise FileNotFoundError("❌ docs folder not found")
+
+    for pdf_file in DOCS_DIR.rglob("*.pdf"):
+        print(f"📄 Loading: {pdf_file.name}")
+        loader = PyPDFLoader(str(pdf_file))
+        documents = loader.load()
+        all_documents.extend(documents)
 
     if not all_documents:
-        print("⚠️ No supported documents found in 'docs/' folder.")
-        return None
+        raise ValueError("❌ No PDF files found in docs/")
 
-    # Split documents into chunks
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ".", "!", "?", ",", " "]
+    # 🔥 Better chunking for RAG quality
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=250,
+        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
     )
-    texts = splitter.split_documents(all_documents)
-    print(f"🔹 Total chunks after splitting: {len(texts)}")
 
-    # Get embeddings
-    embeddings = get_embeddings()
+    texts = text_splitter.split_documents(all_documents)
 
-    # Build vector store
-    vectordb = Chroma.from_documents(
+    # 🔥 Production embedding model (BGE v1.5)
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5",
+        model_kwargs={"device": "cpu"},  # cloud-safe
+        encode_kwargs={"normalize_embeddings": True}
+    )
+
+    # Clear old DB if exists (optional but recommended when changing embedding model)
+    if CHROMA_DIR.exists():
+        print("⚠️ Clearing old Chroma DB (embedding model changed)...")
+        for item in CHROMA_DIR.glob("*"):
+            if item.is_file():
+                item.unlink()
+            else:
+                import shutil
+                shutil.rmtree(item)
+
+    Chroma.from_documents(
         documents=texts,
         embedding=embeddings,
         persist_directory=str(CHROMA_DIR)
     )
-    vectordb.persist()
-    print("✅ Chroma DB built successfully!")
 
-    return vectordb
+    print("✅ Chroma DB built successfully with BGE v1.5.")
+
 
 if __name__ == "__main__":
-    ingest_documents(force_rebuild=True)
+    ingest_documents()
