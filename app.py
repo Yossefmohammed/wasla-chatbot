@@ -135,8 +135,8 @@ def load_documents_to_vectorstore(embeddings, persist_dir):
 @st.cache_resource
 def load_llm():
     return ChatGroq(
-        model="llama3-70b-8192",  # ✅ Updated to a current, supported model
-        temperature=0.5,
+        model="llama-3.3-70b-versatile",  # Try this first
+        temperature=0.7,
         groq_api_key=os.getenv("GROQ_API_KEY"),
         streaming=True,
         max_tokens=1024
