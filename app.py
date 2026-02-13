@@ -1,8 +1,8 @@
 import streamlit as st
-import os, csv, gc, hashlib, json, time, random, traceback, requests
+import os, csv, gc, hashlib, json, time, traceback, requests
 from datetime import datetime
 from dotenv import load_dotenv
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict
 from functools import wraps
 
 # ===============================
@@ -17,14 +17,19 @@ gc.collect()
 # ===============================
 if not os.path.exists("constant.py"):
     with open("constant.py", "w") as f:
-        f.write('''from dataclasses import dataclass\n@dataclass\nclass CHROMA_SETTINGS:\n    persist_directory: str = "./chroma_db"\n''')
+        f.write('''from dataclasses import dataclass
+@dataclass
+class CHROMA_SETTINGS:
+    persist_directory: str = "./chroma_db"
+''')
 from constant import CHROMA_SETTINGS
 
 # ===============================
 # THEME
 # ===============================
 def set_dark_theme():
-    st.markdown("""<style>
+    st.markdown("""
+    <style>
     .stApp { background: linear-gradient(135deg, #0B1020 0%, #151B2B 100%); color: #EAEAF2;}
     section.main > div { max-width: 1000px; margin: auto; padding: 2rem; }
     textarea { background-color: rgba(17, 24, 39, 0.8) !important; color: #E5E7EB !important;
@@ -40,7 +45,8 @@ def set_dark_theme():
     .feedback-btn{background:transparent !important; border:1px solid #4B5563 !important; color:#9CA3AF !important; width:auto !important; padding:0.3rem 1rem !important;}
     .feedback-btn:hover{background:#2563EB !important; border-color:#2563EB !important; color:white !important;}
     footer{visibility:hidden;}
-    </style>""", unsafe_allow_html=True)
+    </style>
+    """, unsafe_allow_html=True)
 
 set_dark_theme()
 
@@ -55,9 +61,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 
 def load_qa_chain() -> RetrievalQA:
-    """Load or create the QA chain using the Chroma DB and HuggingFace embeddings"""
+    """Load or create the QA chain using Chroma DB and HuggingFace embeddings"""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     # Load embeddings
     embeddings = HuggingFaceEmbeddings(
         model_name="BAAI/bge-base-en-v1.5",
@@ -65,22 +71,27 @@ def load_qa_chain() -> RetrievalQA:
         encode_kwargs={"normalize_embeddings": True}
     )
 
-    # Load Chroma DB
+    # Load Chroma vectorstore
     vectordb = Chroma(
         persist_directory=CHROMA_SETTINGS.persist_directory,
         embedding_function=embeddings
     )
 
-    # Setup retriever
     retriever = vectordb.as_retriever(search_kwargs={"k": 3})
 
-    # Optional: Use a HF causal LM pipeline (can be replaced with any LLM)
+    # Load HF LLM pipeline (CPU/GPU safe)
     tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-560m")
-    model = AutoModelForCausalLM.from_pretrained("bigscience/bloom-560m", device_map="auto")
-    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, device=0 if device=="cuda" else -1)
-    llm = HuggingFacePipeline(pipeline=pipe)
+    model = AutoModelForCausalLM.from_pretrained("bigscience/bloom-560m")
+    hf_pipe = pipeline(
+        task="text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        device=0 if device=="cuda" else -1,
+        max_new_tokens=512,
+        temperature=0.7
+    )
+    llm = HuggingFacePipeline(pipeline=hf_pipe)
 
-    # Build QA chain
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         retriever=retriever,
@@ -108,7 +119,7 @@ def init_session_state():
 # SAVE CONVERSATION (Optional)
 # ===============================
 def save_conversation(question, answer, intent):
-    # Implement logging to JSON or DB if needed
+    # Optionally log conversation to JSON or DB
     pass
 
 # ===============================
@@ -146,13 +157,16 @@ def main():
             st.markdown(user_input)
         with st.chat_message("assistant"):
             placeholder = st.empty()
-            def callback(text): placeholder.markdown(text+"▌")
             try:
-                answer, sources = st.session_state.qa_chain.run(user_input)
+                result = st.session_state.qa_chain({"query": user_input})
+                answer = result.get("result") or result.get("answer") or "No answer generated."
+                sources = result.get("source_documents", [])
                 placeholder.markdown(answer)
                 st.session_state.messages.append({
-                    "role":"assistant","content":answer,"sources":sources,
-                    "id":hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
+                    "role":"assistant",
+                    "content": answer,
+                    "sources": sources,
+                    "id": hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
                 })
                 st.session_state.current_question = user_input
                 st.session_state.current_answer = answer
