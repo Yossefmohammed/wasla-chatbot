@@ -61,43 +61,54 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 
 def load_qa_chain() -> RetrievalQA:
-    """Load or create the QA chain using Chroma DB and HuggingFace embeddings"""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    """Load QA chain safely (CPU/GPU compatible)"""
+    try:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load embeddings
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
-    )
+        # Embeddings
+        embeddings = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-base-en-v1.5",
+            model_kwargs={"device": device},
+            encode_kwargs={"normalize_embeddings": True}
+        )
 
-    # Load Chroma vectorstore
-    vectordb = Chroma(
-        persist_directory=CHROMA_SETTINGS.persist_directory,
-        embedding_function=embeddings
-    )
+        # Chroma vectorstore
+        if not os.path.exists(CHROMA_SETTINGS.persist_directory):
+            st.warning("⚠️ Chroma DB not found. Add documents and build the DB first.")
+            return None
 
-    retriever = vectordb.as_retriever(search_kwargs={"k": 3})
+        vectordb = Chroma(
+            persist_directory=CHROMA_SETTINGS.persist_directory,
+            embedding_function=embeddings
+        )
+        retriever = vectordb.as_retriever(search_kwargs={"k": 3})
 
-    # Load HF LLM pipeline (CPU/GPU safe)
-    tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-560m")
-    model = AutoModelForCausalLM.from_pretrained("bigscience/bloom-560m")
-    hf_pipe = pipeline(
-        task="text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        device=0 if device=="cuda" else -1,
-        max_new_tokens=512,
-        temperature=0.7
-    )
-    llm = HuggingFacePipeline(pipeline=hf_pipe)
+        # HF LLM pipeline
+        tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-560m")
+        model = AutoModelForCausalLM.from_pretrained(
+            "bigscience/bloom-560m",
+            device_map=None if device=="cpu" else "auto"
+        )
+        hf_pipe = pipeline(
+            task="text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            device=0 if device=="cuda" else -1,
+            max_new_tokens=512,
+            temperature=0.7
+        )
+        llm = HuggingFacePipeline(pipeline=hf_pipe)
 
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=retriever,
-        return_source_documents=True
-    )
-    return qa_chain
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            retriever=retriever,
+            return_source_documents=True
+        )
+        return qa_chain
+    except Exception as e:
+        st.error(f"❌ Failed to load QA chain: {e}")
+        st.text(traceback.format_exc())
+        return None
 
 # ===============================
 # SESSION STATE INIT
@@ -119,7 +130,7 @@ def init_session_state():
 # SAVE CONVERSATION (Optional)
 # ===============================
 def save_conversation(question, answer, intent):
-    # Optionally log conversation to JSON or DB
+    # Optional: log conversation to JSON or DB
     pass
 
 # ===============================
@@ -134,48 +145,57 @@ def render_sidebar():
 # RUN APP
 # ===============================
 def main():
-    init_session_state()
-    render_sidebar()
-    st.markdown("<h1 style='text-align:center; margin-bottom:2rem;'>🤖 Wasla AI Strategy Consultant</h1>", unsafe_allow_html=True)
+    try:
+        init_session_state()
+        render_sidebar()
+        st.markdown("<h1 style='text-align:center; margin-bottom:2rem;'>🤖 Wasla AI Strategy Consultant</h1>", unsafe_allow_html=True)
 
-    # Display chat history
-    for idx, message in enumerate(st.session_state.messages):
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if message["role"]=="assistant" and message.get("sources"):
-                with st.expander("📚 View Sources", expanded=False):
-                    for i, s in enumerate(message["sources"][:3]):
-                        name = os.path.basename(s.metadata.get("source", f"doc_{i+1}"))
-                        st.markdown(f"**{i+1}. {name}**")
-                        st.caption(s.page_content[:200]+"...")
+        # Display chat history
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+                if message["role"]=="assistant" and message.get("sources"):
+                    with st.expander("📚 View Sources", expanded=False):
+                        for i, s in enumerate(message["sources"][:3]):
+                            name = os.path.basename(s.metadata.get("source", f"doc_{i+1}"))
+                            st.markdown(f"**{i+1}. {name}**")
+                            st.caption(s.page_content[:200]+"...")
 
-    # Chat input
-    user_input = st.chat_input("Ask about Wasla's services, strategy, or business...")
-    if user_input:
-        st.session_state.messages.append({"role":"user", "content":user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            try:
-                result = st.session_state.qa_chain({"query": user_input})
-                answer = result.get("result") or result.get("answer") or "No answer generated."
-                sources = result.get("source_documents", [])
-                placeholder.markdown(answer)
-                st.session_state.messages.append({
-                    "role":"assistant",
-                    "content": answer,
-                    "sources": sources,
-                    "id": hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
-                })
-                st.session_state.current_question = user_input
-                st.session_state.current_answer = answer
-                st.session_state.current_sources = sources
-                save_conversation(user_input, answer, None)
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
+        # Chat input
+        user_input = st.chat_input("Ask about Wasla's services, strategy, or business...")
+        if user_input:
+            st.session_state.messages.append({"role":"user", "content":user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                try:
+                    if st.session_state.qa_chain is None:
+                        placeholder.markdown("⚠️ QA chain not initialized.")
+                    else:
+                        result = st.session_state.qa_chain({"query": user_input})
+                        answer = result.get("result") or result.get("answer") or "No answer generated."
+                        sources = result.get("source_documents", [])
+                        placeholder.markdown(answer)
+                        st.session_state.messages.append({
+                            "role":"assistant",
+                            "content": answer,
+                            "sources": sources,
+                            "id": hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
+                        })
+                        st.session_state.current_question = user_input
+                        st.session_state.current_answer = answer
+                        st.session_state.current_sources = sources
+                        save_conversation(user_input, answer, None)
+                except Exception as e:
+                    st.error(f"❌ Error generating answer: {e}")
+                    st.text(traceback.format_exc())
 
-    st.markdown("<p style='text-align:center;color:#6B7280;font-size:0.8rem;'>Powered by Wasla Solutions • AI Strategy Consultant • Responses are AI-generated</p>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center;color:#6B7280;font-size:0.8rem;'>Powered by Wasla Solutions • AI Strategy Consultant • Responses are AI-generated</p>", unsafe_allow_html=True)
+    
+    except Exception as e:
+        st.error(f"❌ App failed to start: {e}")
+        st.text(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
