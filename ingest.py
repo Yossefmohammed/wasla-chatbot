@@ -3,7 +3,7 @@ from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import SentenceTransformerEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from constant import CHROMA_SETTINGS
 
 
@@ -27,16 +27,31 @@ def ingest_documents():
     if not all_documents:
         raise ValueError("❌ No PDF files found in docs/")
 
+    # 🔥 Better chunking for RAG quality
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=100
+        chunk_size=1200,
+        chunk_overlap=250,
+        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
     )
+
     texts = text_splitter.split_documents(all_documents)
 
-    embeddings = SentenceTransformerEmbeddings(
-        model_name="sentence-transformers/all-mpnet-base-v2",
-        model_kwargs={"device": "cpu"}   # ✅ Cloud-safe
+    # 🔥 Production embedding model (BGE v1.5)
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5",
+        model_kwargs={"device": "cpu"},  # cloud-safe
+        encode_kwargs={"normalize_embeddings": True}
     )
+
+    # Clear old DB if exists (optional but recommended when changing embedding model)
+    if CHROMA_DIR.exists():
+        print("⚠️ Clearing old Chroma DB (embedding model changed)...")
+        for item in CHROMA_DIR.glob("*"):
+            if item.is_file():
+                item.unlink()
+            else:
+                import shutil
+                shutil.rmtree(item)
 
     Chroma.from_documents(
         documents=texts,
@@ -44,7 +59,7 @@ def ingest_documents():
         persist_directory=str(CHROMA_DIR)
     )
 
-    print("✅ Chroma DB built successfully.")
+    print("✅ Chroma DB built successfully with BGE v1.5.")
 
 
 if __name__ == "__main__":
