@@ -351,13 +351,42 @@ def load_qa_chain():
     
     class EnhancedSmartRAG:
         def __init__(self, cheap_llm):
-            self.history = []
+            self.history = []  # stores (query, answer, q_emb, timestamp)
             self.embed_model = SentenceTransformer(
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
             self.greetings_db = self._load_greetings()
             self.cheap_llm = cheap_llm
             self.main_llm = llm
+            
+            # Large fallback greetings list (25+ diverse options)
+            self.fallback_greetings = [
+                "Wasla Solutions – how can we help?",
+                "Welcome to Wasla! What can we do for you?",
+                "Hi there – Wasla here, ready to help.",
+                "Wasla at your service. What brings you in?",
+                "Hello! How can Wasla support you today?",
+                "Greetings from Wasla! What can we assist with?",
+                "Hey! Wasla here – what do you need?",
+                "Wasla Solutions. How may we help?",
+                "Good to see you! Wasla's here to help.",
+                "Hello! Wasla digital strategy, at your service.",
+                "Hi! Ready to dive into some business challenges?",
+                "Welcome! Wasla's here to assist with your questions.",
+                "Hey there! How can Wasla help you today?",
+                "Wasla speaking – what's on your mind?",
+                "Hi! Let's explore how Wasla can support you.",
+                "Hello from the Wasla team! What can we do?",
+                "Wasla's digital consultants are here – ask away!",
+                "Hi! Need help with digital strategy?",
+                "Welcome! Wasla's ready to tackle your questions.",
+                "Hey! Wasla's here to help you succeed.",
+                "Greetings! Wasla Solutions at your service.",
+                "Hello! Ready to transform your business?",
+                "Wasla – your digital strategy partner. How can we assist?",
+                "Hi! What challenges are you facing today?",
+                "Welcome to Wasla – let's solve something together."
+            ]
         
         @retry(max_retries=5, delay=3)
         def safe_llm_invoke(self, prompt, model="main"):
@@ -403,7 +432,7 @@ def load_qa_chain():
                 summaries.append(f"[{source_name}] {preview}")
             return "\n\n".join(summaries)
         
-        # ---------- REPETITION DETECTION – LOWERED THRESHOLD TO 0.82 ----------
+        # ---------- REPETITION DETECTION – BASED ON QUESTION SIMILARITY ----------
         def check_repetition(self, query) -> Tuple[bool, int]:
             if not self.history:
                 return False, 0
@@ -416,11 +445,11 @@ def load_qa_chain():
                 threshold = 0.78 + recency_boost
                 if similarity > threshold:
                     similar_count += 1
-                    if similarity > 0.82:  # 🔥 Lowered from 0.85 → catches more similar questions
+                    if similarity > 0.80:  # Slightly lowered to catch more
                         is_repeat = True
             return is_repeat, similar_count
         
-        # ---------- STRICT PROMPT – ONLY FROM CONTEXT + CREATIVITY + NO REPETITIVE PATTERNS ----------
+        # ---------- GENERATE PROMPT WITH ANTI‑REPETITION MEMORY ----------
         def generate_prompt(self, query, context, history_context="", 
                            repeat=False, repeat_count=0):
             
@@ -503,122 +532,130 @@ Consultant response:"""
                     seen.add(source_name)
             return answer + "\n".join(citation_lines)
         
-        # ---------- MAIN CALL – FULLY GROUNDED, NO HALLUCINATIONS, POLISHED ----------
+        # ---------- MAIN CALL – ALL INTENTS NOW USE LLM WITH MEMORY ----------
         def __call__(self, query, callback=None):
             intent, confidence = self.detect_intent(query)
             timestamp = datetime.now().isoformat()
             q_lower = query.lower().strip()
             words = q_lower.split()
             
-            # ---------- GREETING MODE – STRICT, VARIED, WITH DEDICATED HANDLERS ----------
-            if intent == "greeting" and confidence > 0.7 and len(words) <= 3:
+            # Compute query embedding for repetition tracking (all intents)
+            q_emb = self.embed_model.encode(query, convert_to_tensor=True)
+            
+            # ---------- GREETING MODE – ALWAYS USE LLM WITH ANTI‑REPETITION ----------
+            if intent == "greeting" and confidence > 0.7 and len(words) <= 5:
+                # Gather recent assistant answers from history (last 3)
+                recent_answers = [a for (_, a, _, _) in self.history[-3:]]
+                recent_context = "\n".join([f"- {a}" for a in recent_answers]) if recent_answers else "None yet."
                 
-                # 🚩 DEDICATED "what's up" HANDLER – SHORT & CONCISE
-                if q_lower in ["what's up", "whats up", "sup"]:
-                    answer = random.choice([
-                        "Not much, just here to help! What can I do for you?",
-                        "Hey! Ready to dive into some digital strategy. How can I assist?",
-                        "All good! What's on your mind today?"
-                    ])
-                    if callback: callback(answer)
-                    return answer, [], intent
-                
-                # 🚩 DEDICATED "how are you" HANDLER – WARM & VARIED
-                if any(phrase in q_lower for phrase in ["how are you", "how's it going", "how are things"]):
-                    prompts = [
-                        "We're doing well, thank you! How can we assist you today?",
-                        "All good here, thanks for asking! What can we help you with?",
-                        "Doing great – ready to tackle some digital challenges. What's on your mind?"
-                    ]
-                    answer = random.choice(prompts)
-                    if callback: callback(answer)
-                    return answer, [], intent
-                
-                # 🚩 GENERIC GREETING – MAXIMUM VARIETY
                 prompt = f"""You are the digital front desk of Wasla Solutions.
-Be warm, brief, and professional. Maximum 7 words. 
-Vary your greeting – do NOT repeat the same phrase. 
-Be creative with your openings.
-Do not mention being an AI.
+The user just said: "{query}"
 
-User: {query}
-Response:"""
+Your task: generate a warm, one-sentence greeting.
+You MUST avoid repeating any of these recently used greetings:
+{recent_context}
+
+Rules:
+- Maximum 7 words.
+- Be creative and vary your openings.
+- Do not use generic phrases like "How can I help?" – find fresh ways to engage.
+- Never mention being an AI.
+
+Your new greeting:"""
+                
                 try:
-                    answer = self.safe_llm_invoke(prompt)
-                    if len(answer.split()) > 8:
-                        answer = random.choice([
-                            "Wasla Solutions – how can we help?",
-                            "Welcome to Wasla! What can we do for you?",
-                            "Hi there – Wasla here, ready to help.",
-                            "Wasla at your service. What brings you in?",
-                            "Hello! How can Wasla support you today?",
-                            "Greetings from Wasla! What can we assist with?",
-                            "Hey! Wasla here – what do you need?",
-                            "Wasla Solutions. How may we help?"
-                        ])
-                except:
-                    answer = random.choice([
-                        "Wasla Solutions – how can we help?",
-                        "Welcome to Wasla! How may we assist?",
-                        "Hi! Wasla here – what can we do for you today?",
-                        "Hello from Wasla! What brings you here?",
-                        "Wasla – ready to help. What's your challenge?"
-                    ])
-                if callback: callback(answer)
+                    answer = self.safe_llm_invoke(prompt, model="cheap")
+                    # Optional: if answer is too long, truncate gently
+                    if len(answer.split()) > 10:
+                        answer = answer[:60]  # simple truncation
+                except Exception as e:
+                    # Fallback: choose a greeting not recently used
+                    available = [g for g in self.fallback_greetings if g not in recent_answers]
+                    if not available:
+                        available = self.fallback_greetings
+                    answer = random.choice(available)
+                
+                if callback:
+                    callback(answer)
+                
+                # Store in history for future anti‑repetition
+                self.history.append((query, answer, q_emb, timestamp))
+                if len(self.history) > 30:
+                    self.history = self.history[-30:]
+                
                 return answer, [], intent
 
-            # ---------- SMALL TALK MODE – BRANDED FOR IDENTITY, NEUTRAL FOR OTHERS ----------
+            # ---------- SMALL TALK MODE – BRANDED OR NEUTRAL, BUT STORED IN HISTORY ----------
             if intent == "small_talk" and confidence > 0.7:
                 q_lower = query.lower()
                 
-                # 🚩 Branded answer for "who are you / what can you do" – VARIED
+                # Branded answer for "who are you / what can you do" – let LLM generate varied responses
                 if any(phrase in q_lower for phrase in ["who are you", "what are you", "what can you do", "your name"]):
-                    answer = random.choice([
-                        "We're Wasla Solutions – a digital strategy consultancy. We specialise in AI, digital transformation, and growth strategy. How can we help you today?",
-                        "Great question! We're Wasla Solutions, your digital strategy partner. We help businesses leverage AI, transform digitally, and scale. What brings you here?",
-                        "We're Wasla – a team of digital strategists. Think of us as your co‑pilot for AI, digital products, and business growth. What challenges are you facing?"
-                    ])
-                    if callback: callback(answer)
-                    return answer, [], intent
-                
-                # Location questions → handled by business mode (RAG)
-                if any(phrase in q_lower for phrase in ["where are you", "your location", "headquarters", "based"]):
-                    pass  # fall through to business mode
-                
-                # Generic small talk – keep neutral, no company claims
-                else:
-                    prompt = f"""You are a helpful assistant.
-One short sentence. Do not mention any company details.
-Be friendly and natural.
+                    prompt = f"""You are a consultant from Wasla Solutions.
+The user asked: "{query}"
 
-User: {query}
-Response:"""
+Answer in one or two sentences, warmly introducing Wasla Solutions.
+Focus on our expertise in digital strategy, AI, and transformation.
+Be enthusiastic and vary your wording from previous answers.
+
+Recent answers (avoid repeating these):
+{self._get_recent_answers()}
+
+Your answer:"""
                     try:
-                        answer = self.safe_llm_invoke(prompt)
+                        answer = self.safe_llm_invoke(prompt, model="cheap")
+                    except:
+                        answer = "We're Wasla Solutions – a digital strategy consultancy specialising in AI and transformation. How can we help you today?"
+                else:
+                    # Generic small talk – LLM generates neutral response
+                    prompt = f"""You are a helpful assistant.
+The user said: "{query}"
+
+Respond with one short, friendly sentence. Do not mention any company details.
+Be natural and vary your phrasing.
+
+Recent responses (avoid repeating these):
+{self._get_recent_answers()}
+
+Your response:"""
+                    try:
+                        answer = self.safe_llm_invoke(prompt, model="cheap")
                     except:
                         answer = "I'm here to help with questions about our services."
-                    if callback: callback(answer)
-                    return answer, [], intent
+                
+                if callback:
+                    callback(answer)
+                
+                # Store in history
+                self.history.append((query, answer, q_emb, timestamp))
+                if len(self.history) > 30:
+                    self.history = self.history[-30:]
+                
+                return answer, [], intent
 
-            # ---------- BUSINESS MODE – STRICT RAG ONLY ----------
+            # ---------- BUSINESS MODE – STRICT RAG ONLY, WITH HISTORY CONTEXT ----------
             try:
                 docs = retriever.get_relevant_documents(query)[:3]
                 
                 if not docs:
                     answer = "I don't have information about that in my knowledge base."
-                    if callback: callback(answer)
+                    if callback:
+                        callback(answer)
+                    self.history.append((query, answer, q_emb, timestamp))
+                    if len(self.history) > 30:
+                        self.history = self.history[-30:]
                     return answer, [], intent
                 
                 context = self.summarize_chunks(docs)
                 is_repeat, repeat_count = self.check_repetition(query)
                 
+                # Build history context from last 3 exchanges (full answers, not truncated)
                 history_context = ""
                 if self.history:
-                    recent = self.history[-2:]
+                    recent = self.history[-3:]
                     history_context = "Previous conversation:\n"
                     for q, a, _, _ in recent:
-                        a_short = a[:200] + "…" if len(a) > 200 else a
-                        history_context += f"Q: {q}\nA: {a_short}\n\n"
+                        history_context += f"Q: {q}\nA: {a}\n\n"
                 
                 prompt = self.generate_prompt(
                     query, context, history_context, 
@@ -639,19 +676,27 @@ Response:"""
                 if answer and "I don't have information" not in answer:
                     answer = self.add_inline_citations(answer, docs)
                 
-                q_emb = self.embed_model.encode(query, convert_to_tensor=True)
                 self.history.append((query, answer, q_emb, timestamp))
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
-                if callback: callback(answer)
+                if callback:
+                    callback(answer)
                 return answer, docs, intent
                 
             except Exception as e:
                 print("❌ BUSINESS MODE UNRECOVERABLE ERROR:")
                 traceback.print_exc()
                 error_msg = "I encountered an unexpected issue. Please try again or contact support."
+                self.history.append((query, error_msg, q_emb, timestamp))
+                if len(self.history) > 30:
+                    self.history = self.history[-30:]
                 return error_msg, [], intent
+        
+        def _get_recent_answers(self, n=3):
+            """Helper to get last n assistant answers for anti‑repetition prompts."""
+            recent = [a for (_, a, _, _) in self.history[-n:]]
+            return "\n".join([f"- {a}" for a in recent]) if recent else "None yet."
     
     return EnhancedSmartRAG(cheap_llm)
 
