@@ -479,7 +479,8 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 - Vary your sentence structure and vocabulary – do NOT repeat the same phrases across different answers.
 - Never sound like a robot – avoid bullet points, numbered lists, or overly formal phrasing unless it's a direct quote from context.
 - 🚫 **NEVER start an answer with "You're looking for…" or similar repetitive rhetorical patterns.** Vary your openings.
-- End with a follow‑up question **only if** it feels natural and you have actually provided information. The follow‑up question must be directly related to the user's last query and the information you just provided. Otherwise, simply end with a closing statement."""
+- End with a follow‑up question **only if** it feels natural and you have actually provided information. The follow‑up question must be directly related to the user's last query and the information you just provided. Otherwise, simply end with a closing statement.
+- Do not ask the user about their perception of the conversation or about your own performance – keep the focus on helping them."""
 
             if repeat_count >= 2:
                 return f"""{base_instruction}
@@ -630,11 +631,11 @@ Your answer:"""
                     except:
                         answer = "We're Wasla Solutions – a digital strategy consultancy specialising in AI and transformation. How can we help you today?"
                 else:
+                    # <-- MODIFIED: improved prompt for generic small talk
                     prompt = f"""You are a helpful assistant.
 The user said: "{query}"
 
-Respond with one short, friendly sentence. Do not mention any company details.
-Be natural and vary your phrasing.
+Respond with one short, friendly sentence. Do NOT mention any company details, do NOT discuss your internal guidelines, and do NOT ask the user about their perception of the conversation. Just be warm and natural.
 
 Recent responses (avoid repeating these):
 {self._get_recent_answers()}
@@ -659,15 +660,14 @@ Your response:"""
                 # Get the last assistant response and its sources
                 last_query, last_answer, last_emb, last_ts, last_sources = self.history[-1]
                 docs = []
-                if last_sources:
-                    # Retrieve additional chunks from the same documents
+                # <-- MODIFIED: try current query first, then last_query as fallback
+                docs = self.retriever.get_relevant_documents(query)[:3]
+                if not docs and last_sources:
                     docs = self.retriever.get_relevant_documents(last_query)[:3]
-                if not docs:
-                    # Fallback: retrieve using current query
-                    docs = self.retriever.get_relevant_documents(query)[:3]
                 
                 if not docs:
-                    answer = "I don't have additional information on that topic. Would you like to ask about something else?"
+                    # <-- MODIFIED: more helpful fallback message
+                    answer = "I don't have additional details on that specific point. Would you like to ask about something else related to Wasla?"
                     if callback:
                         callback(answer)
                     self.history.append((query, answer, q_emb, timestamp, []))
@@ -695,7 +695,8 @@ Your response:"""
                 docs = self.retriever.get_relevant_documents(query)[:3]
                 
                 if not docs:
-                    answer = "I don't have information about that in my knowledge base."
+                    # <-- MODIFIED: more helpful fallback for no documents
+                    answer = "I don't have specific information about that in my knowledge base. However, I can tell you more about our core services or a particular area you're interested in. What would you like to know?"
                     if callback:
                         callback(answer)
                     self.history.append((query, answer, q_emb, timestamp, []))
