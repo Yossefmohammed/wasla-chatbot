@@ -171,7 +171,7 @@ def load_qa_chain():
     class SmartRAG:
         def __init__(self):
             self.history = []
-            self.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+            self.embed_model = SentenceTransformer("BAAI/bge-base-en-v1.5")
 
         def check_repetition(self, query) -> Tuple[bool, int]:
             if not self.history:
