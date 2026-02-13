@@ -9,7 +9,6 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 import torch
 import shutil
-from tqdm import tqdm
 
 # Paths
 CHROMA_DIR = Path("./chroma_db")
@@ -28,7 +27,9 @@ LOADERS = {
 
 def ingest_documents(force_rebuild: bool = False, chunk_size: int = 1200, chunk_overlap: int = 250):
     if not DOCS_DIR.exists():
-        raise FileNotFoundError("❌ 'docs' folder not found. Please create it and add documents.")
+        DOCS_DIR.mkdir(parents=True)
+        print("📁 'docs' folder created. Add your documents here.")
+        return None
 
     # Clear old DB if forced
     if CHROMA_DIR.exists() and force_rebuild:
@@ -36,12 +37,12 @@ def ingest_documents(force_rebuild: bool = False, chunk_size: int = 1200, chunk_
         shutil.rmtree(CHROMA_DIR)
 
     all_documents = []
-    # Load documents with progress bar
+    # Load documents
     for ext, loader_cls in LOADERS.items():
         files = list(DOCS_DIR.rglob(f"*{ext}"))
         if not files:
             continue
-        for file_path in tqdm(files, desc=f"Loading {ext} files"):
+        for file_path in files:
             try:
                 loader = loader_cls(str(file_path))
                 docs = loader.load()
@@ -50,7 +51,8 @@ def ingest_documents(force_rebuild: bool = False, chunk_size: int = 1200, chunk_
                 print(f"❌ Failed to load {file_path.name}: {e}")
 
     if not all_documents:
-        raise ValueError("❌ No supported documents found in 'docs/' folder.")
+        print("⚠️ No supported documents found in 'docs/' folder.")
+        return None
 
     # Split documents into chunks
     splitter = RecursiveCharacterTextSplitter(
