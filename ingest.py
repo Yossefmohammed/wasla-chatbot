@@ -11,58 +11,66 @@ import torch
 import shutil
 from tqdm import tqdm
 
-# Use the same path as in app.py
+# Paths
 CHROMA_DIR = Path("./chroma_db")
 DOCS_DIR = Path("docs")
 
-def ingest_documents(force_rebuild=False):
+# Supported file types
+LOADERS = {
+    '.pdf': PyPDFLoader,
+    '.txt': TextLoader,
+    '.csv': CSVLoader,
+    '.docx': UnstructuredWordDocumentLoader,
+    '.doc': UnstructuredWordDocumentLoader,
+    '.pptx': UnstructuredPowerPointLoader,
+    '.ppt': UnstructuredPowerPointLoader,
+}
+
+def ingest_documents(force_rebuild: bool = False, chunk_size: int = 1200, chunk_overlap: int = 250):
     if not DOCS_DIR.exists():
-        raise FileNotFoundError("❌ docs folder not found")
-
-    # Load all supported document types
-    loaders = {
-        '.pdf': PyPDFLoader,
-        '.txt': TextLoader,
-        '.csv': CSVLoader,
-        '.docx': UnstructuredWordDocumentLoader,
-        '.pptx': UnstructuredPowerPointLoader,
-    }
-
-    all_documents = []
-    for ext, loader_cls in loaders.items():
-        for file_path in DOCS_DIR.rglob(f"*{ext}"):
-            print(f"📄 Loading: {file_path.name}")
-            loader = loader_cls(str(file_path))
-            docs = loader.load()
-            all_documents.extend(docs)
-
-    if not all_documents:
-        raise ValueError("❌ No supported documents found in docs/")
-
-    # Split
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=250,
-        separators=["\n\n", "\n", ".", "!", "?", ",", " "]
-    )
-    texts = splitter.split_documents(all_documents)
-    print(f"🔹 Total chunks: {len(texts)}")
-
-    # Use the same embedding model as app.py
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    print(f"⚡ Using device: {device}")
+        raise FileNotFoundError("❌ 'docs' folder not found. Please create it and add documents.")
 
     # Clear old DB if forced
     if CHROMA_DIR.exists() and force_rebuild:
         print("⚠️ Clearing old Chroma DB...")
         shutil.rmtree(CHROMA_DIR)
 
-    # Build and persist
+    all_documents = []
+    # Load documents with progress bar
+    for ext, loader_cls in LOADERS.items():
+        files = list(DOCS_DIR.rglob(f"*{ext}"))
+        if not files:
+            continue
+        for file_path in tqdm(files, desc=f"Loading {ext} files"):
+            try:
+                loader = loader_cls(str(file_path))
+                docs = loader.load()
+                all_documents.extend(docs)
+            except Exception as e:
+                print(f"❌ Failed to load {file_path.name}: {e}")
+
+    if not all_documents:
+        raise ValueError("❌ No supported documents found in 'docs/' folder.")
+
+    # Split documents into chunks
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ".", "!", "?", ",", " "]
+    )
+    texts = splitter.split_documents(all_documents)
+    print(f"🔹 Total chunks after splitting: {len(texts)}")
+
+    # Device selection
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5",
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True}
+    )
+    print(f"⚡ Using embeddings model on device: {device}")
+
+    # Build vector store
     vectordb = Chroma.from_documents(
         documents=texts,
         embedding=embeddings,
@@ -70,6 +78,9 @@ def ingest_documents(force_rebuild=False):
     )
     vectordb.persist()
     print("✅ Chroma DB built successfully with BGE v1.5.")
+
+    return vectordb
+
 
 if __name__ == "__main__":
     ingest_documents(force_rebuild=True)
