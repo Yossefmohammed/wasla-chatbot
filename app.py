@@ -351,14 +351,14 @@ def load_qa_chain():
     
     class EnhancedSmartRAG:
         def __init__(self, cheap_llm):
-            self.history = []  # stores (query, answer, q_emb, timestamp, sources)  # <-- NEW: store sources too
+            self.history = []  # stores (query, answer, q_emb, timestamp, sources)
             self.embed_model = SentenceTransformer(
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
             self.greetings_db = self._load_greetings()
             self.cheap_llm = cheap_llm
             self.main_llm = llm
-            self.retriever = retriever  # <-- NEW: store retriever for reuse
+            self.retriever = retriever
             
             # Large fallback greetings list (25+ diverse options)
             self.fallback_greetings = [
@@ -404,7 +404,6 @@ def load_qa_chain():
                 "how is it going", "how do you do", "nice to meet you"
             ]
         
-        # <-- NEW: elaboration intent phrases
         def detect_intent(self, query):
             q = query.lower().strip()
             if q in self.greetings_db:
@@ -420,7 +419,6 @@ def load_qa_chain():
             for pattern in small_talk_patterns:
                 if pattern in q:
                     return "small_talk", 0.9
-            # <-- NEW: detect elaboration requests
             elaboration_patterns = ["tell me more", "go on", "elaborate", "expand", "more details", "can you explain further", "tell me about that"]
             for pattern in elaboration_patterns:
                 if pattern in q:
@@ -446,7 +444,7 @@ def load_qa_chain():
             q_emb = self.embed_model.encode(query, convert_to_tensor=True)
             similar_count = 0
             is_repeat = False
-            for i, (prev_q, _, prev_emb, _,_) in enumerate(self.history[-8:]):  # <-- MODIFIED: unpack 5 elements
+            for i, (prev_q, _, prev_emb, _,_) in enumerate(self.history[-8:]):
                 similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
                 recency_boost = 1 - (i / 20)
                 threshold = 0.78 + recency_boost
@@ -458,8 +456,7 @@ def load_qa_chain():
         
         # ---------- GENERATE PROMPT WITH ANTI‑REPETITION MEMORY ----------
         def generate_prompt(self, query, context, history_context="", 
-                           repeat=False, repeat_count=0, is_elaboration=False):  # <-- NEW: is_elaboration flag
-            # <-- MODIFIED: enhanced instructions
+                           repeat=False, repeat_count=0, is_elaboration=False):
             base_instruction = """You are a consultant representing Wasla Solutions.
 
 STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
@@ -474,7 +471,7 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 
 🔥 CONCRETE FACTS REQUIREMENT:
 - You MUST extract **at least one specific fact, number, service name, client example, or statistic** from the CONTEXT and include it in your answer.
-- If the CONTEXT contains multiple facts, choose the most relevant one.
+- If the CONTEXT contains multiple facts, choose the most relevant one. If several facts are available, vary your examples across different answers to avoid repetition.
 - Avoid generic marketing words like: passionate, excited, empower, delighted, thrilled, simplify, navigate, ever‑evolving, landscape (unless they appear in the CONTEXT).
 
 🔥 CONVERSATIONAL STYLE:
@@ -482,7 +479,7 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 - Vary your sentence structure and vocabulary – do NOT repeat the same phrases across different answers.
 - Never sound like a robot – avoid bullet points, numbered lists, or overly formal phrasing unless it's a direct quote from context.
 - 🚫 **NEVER start an answer with "You're looking for…" or similar repetitive rhetorical patterns.** Vary your openings.
-- End with a follow‑up question **only if** it feels natural and you have actually provided information. Otherwise, simply end with a closing statement."""
+- End with a follow‑up question **only if** it feels natural and you have actually provided information. The follow‑up question must be directly related to the user's last query and the information you just provided. Otherwise, simply end with a closing statement."""
 
             if repeat_count >= 2:
                 return f"""{base_instruction}
@@ -517,7 +514,6 @@ Previous answers:
 Question: {query}
 
 New answer:"""
-            # <-- NEW: special handling for elaboration
             if is_elaboration:
                 return f"""{base_instruction}
 
@@ -572,7 +568,7 @@ Consultant response:"""
             
             # ---------- GREETING MODE – ALWAYS USE LLM WITH ANTI‑REPETITION ----------
             if intent == "greeting" and confidence > 0.7 and len(words) <= 5:
-                recent_answers = [a for (_, a, _, _, _) in self.history[-3:]]  # <-- MODIFIED: unpack 5
+                recent_answers = [a for (_, a, _, _, _) in self.history[-3:]]
                 recent_context = "\n".join([f"- {a}" for a in recent_answers]) if recent_answers else "None yet."
                 
                 prompt = f"""You are the digital front desk of Wasla Solutions.
@@ -604,7 +600,7 @@ Your new greeting:"""
                     callback(answer)
                 
                 # Store in history (sources = [])
-                self.history.append((query, answer, q_emb, timestamp, []))  # <-- MODIFIED: added sources
+                self.history.append((query, answer, q_emb, timestamp, []))
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
@@ -615,10 +611,13 @@ Your new greeting:"""
                 q_lower = query.lower()
                 
                 if any(phrase in q_lower for phrase in ["who are you", "what are you", "what can you do", "your name"]):
+                    # ENHANCED: require concrete fact and ban generic words
                     prompt = f"""You are a consultant from Wasla Solutions.
 The user asked: "{query}"
 
 Answer in one or two sentences, warmly introducing Wasla Solutions.
+🔥 YOU MUST include at least one specific fact from the company’s knowledge base (e.g., location, a service, a client result, a founding detail). Do NOT use generic marketing words like 'empower', 'thrilled', 'pioneering' unless they appear in a fact.
+
 Focus on our expertise in digital strategy, AI, and transformation.
 Be enthusiastic and vary your wording from previous answers.
 
@@ -649,28 +648,26 @@ Your response:"""
                 if callback:
                     callback(answer)
                 
-                self.history.append((query, answer, q_emb, timestamp, []))  # <-- MODIFIED: added sources
+                self.history.append((query, answer, q_emb, timestamp, []))
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
                 return answer, [], intent
 
-            # ---------- ELABORATION MODE – USE SOURCES FROM LAST ANSWER ----------
+            # ---------- ELABORATION MODE – USE SOURCES FROM LAST ANSWER, WITH FALLBACK ----------
             if intent == "elaboration" and self.history:
                 # Get the last assistant response and its sources
-                last_query, last_answer, last_emb, last_ts, last_sources = self.history[-1]  # <-- NEW
+                last_query, last_answer, last_emb, last_ts, last_sources = self.history[-1]
+                docs = []
                 if last_sources:
                     # Retrieve additional chunks from the same documents
-                    # For simplicity, we'll re‑run a broader retrieval using the last query as seed
-                    # or we could store more chunks. Here we just retrieve fresh using the current query.
-                    docs = self.retriever.get_relevant_documents(last_query)[:3]  # use last query to stay on topic
-                    # Or use current query? We'll use last_query to keep context.
-                else:
-                    # No sources from last answer, fallback to normal retrieval
+                    docs = self.retriever.get_relevant_documents(last_query)[:3]
+                if not docs:
+                    # Fallback: retrieve using current query
                     docs = self.retriever.get_relevant_documents(query)[:3]
                 
                 if not docs:
-                    answer = "I don't have additional information on that topic."
+                    answer = "I don't have additional information on that topic. Would you like to ask about something else?"
                     if callback:
                         callback(answer)
                     self.history.append((query, answer, q_emb, timestamp, []))
@@ -695,7 +692,7 @@ Your response:"""
 
             # ---------- BUSINESS MODE – STRICT RAG ONLY, WITH HISTORY CONTEXT ----------
             try:
-                docs = self.retriever.get_relevant_documents(query)[:3]  # <-- MODIFIED: use self.retriever
+                docs = self.retriever.get_relevant_documents(query)[:3]
                 
                 if not docs:
                     answer = "I don't have information about that in my knowledge base."
@@ -737,7 +734,7 @@ Your response:"""
                 if answer and "I don't have information" not in answer:
                     answer = self.add_inline_citations(answer, docs)
                 
-                self.history.append((query, answer, q_emb, timestamp, docs))  # <-- MODIFIED: store sources
+                self.history.append((query, answer, q_emb, timestamp, docs))
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
@@ -755,7 +752,7 @@ Your response:"""
                 return error_msg, [], intent
         
         def _get_recent_answers(self, n=3):
-            recent = [a for (_, a, _, _, _) in self.history[-n:]]  # <-- MODIFIED: unpack 5
+            recent = [a for (_, a, _, _, _) in self.history[-n:]]
             return "\n".join([f"- {a}" for a in recent]) if recent else "None yet."
     
     return EnhancedSmartRAG(cheap_llm)
