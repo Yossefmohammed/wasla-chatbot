@@ -9,6 +9,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 import torch
 import shutil
+from tqdm import tqdm
 
 # Paths
 CHROMA_DIR = Path("./chroma_db")
@@ -25,24 +26,40 @@ LOADERS = {
     '.ppt': UnstructuredPowerPointLoader,
 }
 
+# Embedding selection based on device
+def get_embeddings():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        model_name = "sentence-transformers/all-MiniLM-L6-v2"  # lightweight CPU model
+    else:
+        model_name = "BAAI/bge-base-en-v1.5"  # GPU-optimized
+    embeddings = HuggingFaceEmbeddings(
+        model_name=model_name,
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True}
+    )
+    print(f"⚡ Using embeddings: {model_name} on device: {device}")
+    return embeddings
+
 def ingest_documents(force_rebuild: bool = False, chunk_size: int = 1200, chunk_overlap: int = 250):
+    # Ensure docs folder exists
     if not DOCS_DIR.exists():
         DOCS_DIR.mkdir(parents=True)
-        print("📁 'docs' folder created. Add your documents here.")
+        print("📁 'docs' folder created. Add your documents here and rerun the script.")
         return None
 
-    # Clear old DB if forced
+    # Clear old DB if needed
     if CHROMA_DIR.exists() and force_rebuild:
         print("⚠️ Clearing old Chroma DB...")
         shutil.rmtree(CHROMA_DIR)
 
     all_documents = []
-    # Load documents
+    # Load documents with progress
     for ext, loader_cls in LOADERS.items():
         files = list(DOCS_DIR.rglob(f"*{ext}"))
         if not files:
             continue
-        for file_path in files:
+        for file_path in tqdm(files, desc=f"Loading {ext} files"):
             try:
                 loader = loader_cls(str(file_path))
                 docs = loader.load()
@@ -63,14 +80,8 @@ def ingest_documents(force_rebuild: bool = False, chunk_size: int = 1200, chunk_
     texts = splitter.split_documents(all_documents)
     print(f"🔹 Total chunks after splitting: {len(texts)}")
 
-    # Device selection
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    print(f"⚡ Using embeddings model on device: {device}")
+    # Get embeddings
+    embeddings = get_embeddings()
 
     # Build vector store
     vectordb = Chroma.from_documents(
@@ -79,10 +90,9 @@ def ingest_documents(force_rebuild: bool = False, chunk_size: int = 1200, chunk_
         persist_directory=str(CHROMA_DIR)
     )
     vectordb.persist()
-    print("✅ Chroma DB built successfully with BGE v1.5.")
+    print("✅ Chroma DB built successfully!")
 
     return vectordb
-
 
 if __name__ == "__main__":
     ingest_documents(force_rebuild=True)

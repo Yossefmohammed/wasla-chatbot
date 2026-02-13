@@ -1,21 +1,10 @@
 import streamlit as st
-import os, hashlib, json, time, gc, shutil
-from datetime import datetime
+import os, hashlib, json, time, shutil
 from pathlib import Path
+from datetime import datetime
 from dotenv import load_dotenv
-from typing import List
+import gc
 import torch
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
-from langchain.llms import HuggingFacePipeline
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from langchain_community.document_loaders import (
-    PyPDFLoader, TextLoader, CSVLoader,
-    UnstructuredWordDocumentLoader, UnstructuredPowerPointLoader
-)
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from tqdm import tqdm
 
 # ===============================
 # ENV & INIT
@@ -55,10 +44,6 @@ def set_dark_theme():
             transition: transform 0.2s, box-shadow 0.2s !important;}
     button:hover {transform: translateY(-2px); box-shadow:0 8px 20px rgba(37,99,235,0.3) !important;}
     section[data-testid="stSidebar"] button{width:100%; margin:0.2rem 0;}
-    .chat-card{background:rgba(31,41,55,0.5); border-radius:12px; padding:1.5rem; margin:1rem 0; border:1px solid rgba(75,85,99,0.3); backdrop-filter:blur(10px);}
-    .source-badge{background:#1F2937; color:#9CA3AF; padding:0.2rem 0.8rem; border-radius:20px; font-size:0.8rem; display:inline-block; margin:0.2rem;}
-    .feedback-btn{background:transparent !important; border:1px solid #4B5563 !important; color:#9CA3AF !important; width:auto !important; padding:0.3rem 1rem !important;}
-    .feedback-btn:hover{background:#2563EB !important; border-color:#2563EB !important; color:white !important;}
     footer{visibility:hidden;}
     </style>
     """, unsafe_allow_html=True)
@@ -66,8 +51,20 @@ def set_dark_theme():
 set_dark_theme()
 
 # ===============================
-# DOCUMENT LOADING / INGESTION
+# LANGCHAIN / HF IMPORTS
 # ===============================
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.chains import RetrievalQA
+from langchain.llms import HuggingFacePipeline
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import (
+    PyPDFLoader, TextLoader, CSVLoader,
+    UnstructuredWordDocumentLoader, UnstructuredPowerPointLoader
+)
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+
+# Supported loaders
 LOADERS = {
     '.pdf': PyPDFLoader,
     '.txt': TextLoader,
@@ -78,89 +75,76 @@ LOADERS = {
     '.ppt': UnstructuredPowerPointLoader,
 }
 
-def build_chroma_db(chunk_size: int = 1200, chunk_overlap: int = 250):
+# ===============================
+# EMBEDDINGS
+# ===============================
+def get_embeddings():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Choose lightweight model for CPU, BGE for GPU
+    model_name = "sentence-transformers/all-MiniLM-L6-v2" if device=="cpu" else "BAAI/bge-base-en-v1.5"
+    embeddings = HuggingFaceEmbeddings(
+        model_name=model_name,
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True}
+    )
+    return embeddings, device, model_name
+
+# ===============================
+# DOC INGESTION
+# ===============================
+def build_chroma_db(force_rebuild=False):
     if not DOCS_DIR.exists() or not any(DOCS_DIR.iterdir()):
-        st.warning("❌ No documents found in `docs/`. Upload files first.")
+        st.warning("📂 Please upload documents first in the 'docs' folder.")
         return None
 
-    # Clear old DB
-    if CHROMA_DIR.exists():
+    if CHROMA_DIR.exists() and force_rebuild:
         shutil.rmtree(CHROMA_DIR)
 
     all_docs = []
     for ext, loader_cls in LOADERS.items():
-        for file_path in DOCS_DIR.rglob(f"*{ext}"):
+        for file in DOCS_DIR.rglob(f"*{ext}"):
             try:
-                loader = loader_cls(str(file_path))
+                loader = loader_cls(str(file))
                 docs = loader.load()
                 all_docs.extend(docs)
             except Exception as e:
-                st.error(f"Failed to load {file_path.name}: {e}")
+                st.error(f"Failed to load {file.name}: {e}")
 
     if not all_docs:
-        st.warning("❌ No valid documents loaded.")
+        st.error("❌ No valid documents found.")
         return None
 
-    # Split into chunks
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ".", "!", "?", ",", " "]
-    )
-    texts = splitter.split_documents(all_docs)
-    st.success(f"🔹 Total chunks created: {len(texts)}")
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=250)
+    chunks = splitter.split_documents(all_docs)
 
-    # Embeddings
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    st.info(f"⚡ Using embeddings model on {device}")
+    embeddings, device, model_name = get_embeddings()
 
-    # Build vectorstore
     vectordb = Chroma.from_documents(
-        documents=texts,
+        documents=chunks,
         embedding=embeddings,
-        persist_directory=str(CHROMA_DIR)
+        persist_directory=str(CHROMA_DIR),
+        client_settings={"telemetry_enabled": False}
     )
     vectordb.persist()
-    st.success("✅ Chroma DB built successfully!")
+    st.success(f"✅ Chroma DB built successfully with {len(chunks)} chunks using {model_name}!")
     return vectordb
 
 # ===============================
 # QA CHAIN
 # ===============================
-def load_qa_chain() -> RetrievalQA:
-    if not CHROMA_DIR.exists():
-        st.warning("⚠️ Chroma DB not found. Build the DB first.")
-        return None
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
-        model_kwargs={"device": device},
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    vectordb = Chroma(
-        persist_directory=CHROMA_SETTINGS.persist_directory,
-        embedding_function=embeddings
-    )
-    retriever = vectordb.as_retriever(search_kwargs={"k": 3})
-
-    tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-560m")
-    model = AutoModelForCausalLM.from_pretrained("bigscience/bloom-560m")
+def load_qa_chain(vectordb):
+    retriever = vectordb.as_retriever(search_kwargs={"k":3})
+    tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-60m")
+    model = AutoModelForCausalLM.from_pretrained("bigscience/bloom-60m")
     hf_pipe = pipeline(
         task="text-generation",
         model=model,
         tokenizer=tokenizer,
-        device=0 if device=="cuda" else -1,
-        max_new_tokens=512,
+        device=-1,  # CPU safe
+        max_new_tokens=256,
         temperature=0.7
     )
     llm = HuggingFacePipeline(pipeline=hf_pipe)
-
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         retriever=retriever,
@@ -169,11 +153,11 @@ def load_qa_chain() -> RetrievalQA:
     return qa_chain
 
 # ===============================
-# SESSION STATE
+# SESSION STATE INIT
 # ===============================
 def init_session_state():
     defaults = {
-        "messages": [], "qa_chain": None, "uploaded_files": [],
+        "messages": [], "qa_chain": None, "vectordb": None,
         "current_question": "", "current_answer": "", "current_sources": [],
         "session_id": hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()
     }
@@ -181,91 +165,61 @@ def init_session_state():
         if key not in st.session_state:
             st.session_state[key] = value
 
-    if st.session_state.qa_chain is None and CHROMA_DIR.exists():
-        with st.spinner("🚀 Initializing AI consultant..."):
-            st.session_state.qa_chain = load_qa_chain()
-
-# ===============================
-# SAVE CONVERSATION
-# ===============================
-def save_conversation(question, answer, intent):
-    # Optional: log conversation to JSON/DB
-    pass
-
 # ===============================
 # SIDEBAR
 # ===============================
 def render_sidebar():
     st.sidebar.title("Wasla AI Consultant")
-    st.sidebar.markdown("Upload documents and ask questions about Wasla's services, strategy, or business.")
-    uploaded_files = st.sidebar.file_uploader("Upload Docs", type=['pdf','txt','csv','docx','doc','pptx','ppt'], accept_multiple_files=True)
-    if uploaded_files:
-        for file in uploaded_files:
-            file_path = DOCS_DIR / file.name
-            DOCS_DIR.mkdir(exist_ok=True)
-            with open(file_path, "wb") as f:
-                f.write(file.getbuffer())
-        st.sidebar.success(f"✅ Uploaded {len(uploaded_files)} file(s)")
-
-    if st.sidebar.button("Build Chroma DB"):
-        with st.spinner("⚡ Building Chroma DB..."):
-            db = build_chroma_db()
-            if db:
-                st.session_state.qa_chain = load_qa_chain()
-
+    st.sidebar.markdown("Upload docs or ask questions about Wasla's business.")
+    if st.sidebar.button("Build / Rebuild Chroma DB"):
+        st.session_state.vectordb = build_chroma_db(force_rebuild=True)
+        if st.session_state.vectordb:
+            st.session_state.qa_chain = load_qa_chain(st.session_state.vectordb)
     if st.sidebar.button("Clear Chat"):
         st.session_state.messages.clear()
 
 # ===============================
-# MAIN APP
+# APP
 # ===============================
 def main():
     init_session_state()
     render_sidebar()
-    st.markdown("<h1 style='text-align:center; margin-bottom:2rem;'>🤖 Wasla AI Strategy Consultant</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align:center;'>🤖 Wasla AI Strategy Consultant</h1>", unsafe_allow_html=True)
 
-    if st.session_state.qa_chain is None:
-        st.warning("⚠️ Chroma DB not initialized. Upload documents and click 'Build Chroma DB'.")
-        return
-
-    # Chat history
-    for idx, message in enumerate(st.session_state.messages):
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if message["role"]=="assistant" and message.get("sources"):
-                with st.expander("📚 View Sources", expanded=False):
-                    for i, s in enumerate(message["sources"][:3]):
-                        name = os.path.basename(s.metadata.get("source", f"doc_{i+1}"))
-                        st.markdown(f"**{i+1}. {name}**")
+    # Show chat messages
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"]=="assistant" and msg.get("sources"):
+                with st.expander("📚 Sources"):
+                    for i, s in enumerate(msg["sources"][:3]):
+                        st.markdown(f"**{i+1}. {s.metadata.get('source','doc')}**")
                         st.caption(s.page_content[:200]+"...")
 
     # Chat input
-    user_input = st.chat_input("Ask about Wasla's services, strategy, or business...")
+    user_input = st.chat_input("Ask a question...")
     if user_input:
-        st.session_state.messages.append({"role":"user", "content":user_input})
+        st.session_state.messages.append({"role":"user","content":user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
         with st.chat_message("assistant"):
-            placeholder = st.empty()
-            try:
-                result = st.session_state.qa_chain({"query": user_input})
-                answer = result.get("result") or result.get("answer") or "No answer generated."
-                sources = result.get("source_documents", [])
-                placeholder.markdown(answer)
-                st.session_state.messages.append({
-                    "role":"assistant",
-                    "content": answer,
-                    "sources": sources,
-                    "id": hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
-                })
-                st.session_state.current_question = user_input
-                st.session_state.current_answer = answer
-                st.session_state.current_sources = sources
-                save_conversation(user_input, answer, None)
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
+            if st.session_state.qa_chain is None:
+                st.warning("⚠️ Build the Chroma DB first!")
+            else:
+                try:
+                    result = st.session_state.qa_chain({"query": user_input})
+                    answer = result.get("result") or result.get("answer") or "No answer."
+                    sources = result.get("source_documents", [])
+                    st.markdown(answer)
+                    st.session_state.messages.append({
+                        "role":"assistant",
+                        "content": answer,
+                        "sources": sources
+                    })
+                except Exception as e:
+                    st.error(f"❌ Error: {e}")
 
-    st.markdown("<p style='text-align:center;color:#6B7280;font-size:0.8rem;'>Powered by Wasla Solutions • AI Strategy Consultant • Responses are AI-generated</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#6B7280;'>Powered by Wasla Solutions • AI Strategy Consultant</p>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
