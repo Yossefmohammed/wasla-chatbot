@@ -352,6 +352,8 @@ def load_qa_chain():
     class EnhancedSmartRAG:
         def __init__(self, cheap_llm):
             self.history = []  # stores (query, answer, q_emb, timestamp, sources)
+            # <-- NEW: track used facts (simple: store last 5 answers to give context)
+            self.recent_answers = []  # list of last 5 answer strings
             self.embed_model = SentenceTransformer(
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
@@ -457,7 +459,12 @@ def load_qa_chain():
         # ---------- GENERATE PROMPT WITH ANTI‑REPETITION MEMORY ----------
         def generate_prompt(self, query, context, history_context="", 
                            repeat=False, repeat_count=0, is_elaboration=False):
-            base_instruction = """You are a consultant representing Wasla Solutions.
+            # <-- NEW: add recent answers to help avoid repeating facts
+            recent_answers_text = ""
+            if self.recent_answers:
+                recent_answers_text = "\nRecently used facts/phrases (avoid repeating these if possible):\n" + "\n".join([f"- {ans[:100]}..." for ans in self.recent_answers[-3:]])
+            
+            base_instruction = f"""You are a consultant representing Wasla Solutions.
 
 STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 1. ONLY use information from the provided CONTEXT section.
@@ -469,6 +476,11 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 5. Always refer to Wasla Solutions as "we", "us", or "our".
 6. Maximum 5 sentences.
 
+🔥 CRITICAL – NEVER TALK ABOUT YOURSELF:
+- Do NOT mention that you are a chatbot, an AI, or any internal guidelines, rules, or design principles.
+- Do NOT describe how you were built or how you function.
+- Never say "our chatbot" or "my programming" – just be a helpful consultant.
+
 🔥 CONCRETE FACTS REQUIREMENT:
 - You MUST extract **at least one specific fact, number, service name, client example, or statistic** from the CONTEXT and include it in your answer.
 - If the CONTEXT contains multiple facts, choose the most relevant one. If several facts are available, vary your examples across different answers to avoid repetition.
@@ -479,8 +491,10 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 - Vary your sentence structure and vocabulary – do NOT repeat the same phrases across different answers.
 - Never sound like a robot – avoid bullet points, numbered lists, or overly formal phrasing unless it's a direct quote from context.
 - 🚫 **NEVER start an answer with "You're looking for…" or similar repetitive rhetorical patterns.** Vary your openings.
-- End with a follow‑up question **only if** it feels natural and you have actually provided information. The follow‑up question must be directly related to the user's last query and the information you just provided. Otherwise, simply end with a closing statement.
-- Do not ask the user about their perception of the conversation or about your own performance – keep the focus on helping them."""
+- End with a follow‑up question **only if** it feels natural and you have actually provided information. The follow‑up question must be directly related to the user's last query and the information you just provided. Vary your follow‑up questions – do not use the same one repeatedly. If you can't think of a natural follow-up, simply end with a closing statement like "Let me know if you'd like to know more."
+- Do not ask the user about their perception of the conversation or about your own performance – keep the focus on helping them.
+
+{recent_answers_text}"""
 
             if repeat_count >= 2:
                 return f"""{base_instruction}
@@ -521,9 +535,9 @@ New answer:"""
 The user is asking for more details on a topic you just discussed.
 
 🔥 ELABORATION MODE:
-- Provide **additional facts, examples, or deeper explanation** from the CONTEXT.
+- You MUST provide **additional facts, examples, or deeper explanation** from the CONTEXT that were NOT mentioned in your previous answers.
 - Do NOT simply rephrase your previous answer.
-- If the CONTEXT has more details, use them. If not, say "I've shared everything I know on that topic from our knowledge base. Would you like to ask about something else?"
+- If the CONTEXT contains new details, use them. If all facts have been covered, say "I've shared everything I know on that topic from our knowledge base. Would you like to ask about something else?"
 - You may include up to 5 sentences.
 
 CONTEXT:
@@ -602,6 +616,9 @@ Your new greeting:"""
                 
                 # Store in history (sources = [])
                 self.history.append((query, answer, q_emb, timestamp, []))
+                self.recent_answers.append(answer)
+                if len(self.recent_answers) > 5:
+                    self.recent_answers = self.recent_answers[-5:]
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
@@ -650,6 +667,9 @@ Your response:"""
                     callback(answer)
                 
                 self.history.append((query, answer, q_emb, timestamp, []))
+                self.recent_answers.append(answer)
+                if len(self.recent_answers) > 5:
+                    self.recent_answers = self.recent_answers[-5:]
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
@@ -671,6 +691,9 @@ Your response:"""
                     if callback:
                         callback(answer)
                     self.history.append((query, answer, q_emb, timestamp, []))
+                    self.recent_answers.append(answer)
+                    if len(self.recent_answers) > 5:
+                        self.recent_answers = self.recent_answers[-5:]
                     return answer, [], intent
                 
                 context = self.summarize_chunks(docs)
@@ -686,6 +709,9 @@ Your response:"""
                     answer = self.add_inline_citations(answer, docs)
                 
                 self.history.append((query, answer, q_emb, timestamp, docs))
+                self.recent_answers.append(answer)
+                if len(self.recent_answers) > 5:
+                    self.recent_answers = self.recent_answers[-5:]
                 if callback:
                     callback(answer)
                 return answer, docs, intent
@@ -700,6 +726,9 @@ Your response:"""
                     if callback:
                         callback(answer)
                     self.history.append((query, answer, q_emb, timestamp, []))
+                    self.recent_answers.append(answer)
+                    if len(self.recent_answers) > 5:
+                        self.recent_answers = self.recent_answers[-5:]
                     if len(self.history) > 30:
                         self.history = self.history[-30:]
                     return answer, [], intent
@@ -736,6 +765,9 @@ Your response:"""
                     answer = self.add_inline_citations(answer, docs)
                 
                 self.history.append((query, answer, q_emb, timestamp, docs))
+                self.recent_answers.append(answer)
+                if len(self.recent_answers) > 5:
+                    self.recent_answers = self.recent_answers[-5:]
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
@@ -748,6 +780,9 @@ Your response:"""
                 traceback.print_exc()
                 error_msg = "I encountered an unexpected issue. Please try again or contact support."
                 self.history.append((query, error_msg, q_emb, timestamp, []))
+                self.recent_answers.append(error_msg)
+                if len(self.recent_answers) > 5:
+                    self.recent_answers = self.recent_answers[-5:]
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 return error_msg, [], intent
