@@ -45,6 +45,50 @@ def set_dark_theme():
 set_dark_theme()
 
 # ===============================
+# QA CHAIN
+# ===============================
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.chains import RetrievalQA
+from langchain.llms import HuggingFacePipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+import torch
+
+def load_qa_chain() -> RetrievalQA:
+    """Load or create the QA chain using the Chroma DB and HuggingFace embeddings"""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Load embeddings
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5",
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True}
+    )
+
+    # Load Chroma DB
+    vectordb = Chroma(
+        persist_directory=CHROMA_SETTINGS.persist_directory,
+        embedding_function=embeddings
+    )
+
+    # Setup retriever
+    retriever = vectordb.as_retriever(search_kwargs={"k": 3})
+
+    # Optional: Use a HF causal LM pipeline (can be replaced with any LLM)
+    tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-560m")
+    model = AutoModelForCausalLM.from_pretrained("bigscience/bloom-560m", device_map="auto")
+    pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, device=0 if device=="cuda" else -1)
+    llm = HuggingFacePipeline(pipeline=pipe)
+
+    # Build QA chain
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=retriever,
+        return_source_documents=True
+    )
+    return qa_chain
+
+# ===============================
 # SESSION STATE INIT
 # ===============================
 def init_session_state():
@@ -59,6 +103,21 @@ def init_session_state():
     if st.session_state.qa_chain is None:
         with st.spinner("🚀 Initializing AI consultant..."):
             st.session_state.qa_chain = load_qa_chain()
+
+# ===============================
+# SAVE CONVERSATION (Optional)
+# ===============================
+def save_conversation(question, answer, intent):
+    # Implement logging to JSON or DB if needed
+    pass
+
+# ===============================
+# SIDEBAR
+# ===============================
+def render_sidebar():
+    st.sidebar.title("Wasla AI Consultant")
+    st.sidebar.markdown("Ask questions about Wasla's services, strategy, or business.")
+    st.sidebar.button("Clear Chat", on_click=lambda: st.session_state.messages.clear())
 
 # ===============================
 # RUN APP
@@ -89,16 +148,16 @@ def main():
             placeholder = st.empty()
             def callback(text): placeholder.markdown(text+"▌")
             try:
-                answer, sources, intent = st.session_state.qa_chain(user_input, callback=callback)
+                answer, sources = st.session_state.qa_chain.run(user_input)
                 placeholder.markdown(answer)
                 st.session_state.messages.append({
-                    "role":"assistant","content":answer,"sources":sources,"intent":intent,
+                    "role":"assistant","content":answer,"sources":sources,
                     "id":hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
                 })
                 st.session_state.current_question = user_input
                 st.session_state.current_answer = answer
                 st.session_state.current_sources = sources
-                save_conversation(user_input, answer, intent)
+                save_conversation(user_input, answer, None)
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
 
