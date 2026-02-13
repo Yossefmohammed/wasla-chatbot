@@ -339,7 +339,7 @@ def load_qa_chain():
     db = load_vectorstore()
     retriever = db.as_retriever(
         search_type="similarity",
-        search_kwargs={"k": 3}
+        search_kwargs={"k": 5}  # <-- INCREASED to 5 for better coverage
     )
     
     cheap_llm = ChatGroq(
@@ -352,7 +352,6 @@ def load_qa_chain():
     class EnhancedSmartRAG:
         def __init__(self, cheap_llm):
             self.history = []  # stores (query, answer, q_emb, timestamp, sources)
-            # <-- NEW: track used facts (simple: store last 5 answers to give context)
             self.recent_answers = []  # list of last 5 answer strings
             self.embed_model = SentenceTransformer(
                 "sentence-transformers/all-MiniLM-L6-v2"
@@ -425,6 +424,11 @@ def load_qa_chain():
             for pattern in elaboration_patterns:
                 if pattern in q:
                     return "elaboration", 0.9
+            # Detect vague follow-ups (e.g., "they do any thing else?")
+            vague_patterns = ["anything else", "any thing else", "do you do anything", "what else"]
+            for pattern in vague_patterns:
+                if pattern in q:
+                    return "vague_followup", 0.7
             return "business", 0.8
         
         # ---------- RAW CONTEXT PREVIEW (NO LLM) – FAST & FACTUAL ----------
@@ -459,7 +463,6 @@ def load_qa_chain():
         # ---------- GENERATE PROMPT WITH ANTI‑REPETITION MEMORY ----------
         def generate_prompt(self, query, context, history_context="", 
                            repeat=False, repeat_count=0, is_elaboration=False):
-            # <-- NEW: add recent answers to help avoid repeating facts
             recent_answers_text = ""
             if self.recent_answers:
                 recent_answers_text = "\nRecently used facts/phrases (avoid repeating these if possible):\n" + "\n".join([f"- {ans[:100]}..." for ans in self.recent_answers[-3:]])
@@ -648,7 +651,6 @@ Your answer:"""
                     except:
                         answer = "We're Wasla Solutions – a digital strategy consultancy specialising in AI and transformation. How can we help you today?"
                 else:
-                    # <-- MODIFIED: improved prompt for generic small talk
                     prompt = f"""You are a helpful assistant.
 The user said: "{query}"
 
@@ -675,19 +677,25 @@ Your response:"""
                 
                 return answer, [], intent
 
-            # ---------- ELABORATION MODE – USE SOURCES FROM LAST ANSWER, WITH FALLBACK ----------
+            # ---------- ELABORATION MODE – MORE ROBUST RETRIEVAL ----------
             if intent == "elaboration" and self.history:
-                # Get the last assistant response and its sources
                 last_query, last_answer, last_emb, last_ts, last_sources = self.history[-1]
                 docs = []
-                # <-- MODIFIED: try current query first, then last_query as fallback
-                docs = self.retriever.get_relevant_documents(query)[:3]
+                
+                # Try current query first
+                docs = self.retriever.get_relevant_documents(query)[:5]
+                if not docs:
+                    # If that fails, try combining last answer and current query for a richer search
+                    combined_query = f"{last_query} {query} additional details"
+                    docs = self.retriever.get_relevant_documents(combined_query)[:5]
+                
                 if not docs and last_sources:
-                    docs = self.retriever.get_relevant_documents(last_query)[:3]
+                    # Last resort: use last query
+                    docs = self.retriever.get_relevant_documents(last_query)[:5]
                 
                 if not docs:
-                    # <-- MODIFIED: more helpful fallback message
-                    answer = "I don't have additional details on that specific point. Would you like to ask about something else related to Wasla?"
+                    # Suggest related topics based on history
+                    answer = "I don't have additional details on that specific point. Would you like to know more about our digital solutions, software development, or mobile applications instead?"
                     if callback:
                         callback(answer)
                     self.history.append((query, answer, q_emb, timestamp, []))
@@ -716,12 +724,49 @@ Your response:"""
                     callback(answer)
                 return answer, docs, intent
 
-            # ---------- BUSINESS MODE – STRICT RAG ONLY, WITH HISTORY CONTEXT ----------
-            try:
-                docs = self.retriever.get_relevant_documents(query)[:3]
+            # ---------- VAGUE FOLLOW-UP MODE ----------
+            if intent == "vague_followup" and self.history:
+                last_query, last_answer, last_emb, last_ts, last_sources = self.history[-1]
+                # Use combined query for retrieval
+                combined = f"{last_query} {query}"
+                docs = self.retriever.get_relevant_documents(combined)[:5]
+                if not docs:
+                    docs = self.retriever.get_relevant_documents(last_query)[:5]
+                if not docs:
+                    docs = self.retriever.get_relevant_documents(query)[:5]
                 
                 if not docs:
-                    # <-- MODIFIED: more helpful fallback for no documents
+                    answer = "Could you specify what area you're interested in? We work on digital solutions, software development, websites, and mobile applications."
+                    if callback:
+                        callback(answer)
+                    self.history.append((query, answer, q_emb, timestamp, []))
+                    self.recent_answers.append(answer)
+                    return answer, [], intent
+                
+                context = self.summarize_chunks(docs)
+                prompt = self.generate_prompt(query, context, is_elaboration=False)
+                
+                try:
+                    answer = self.safe_llm_invoke(prompt)
+                except Exception as e:
+                    answer = "I'm sorry, I couldn't find specific information on that. Could you clarify?"
+                
+                if answer and "I don't have information" not in answer:
+                    answer = self.add_inline_citations(answer, docs)
+                
+                self.history.append((query, answer, q_emb, timestamp, docs))
+                self.recent_answers.append(answer)
+                if len(self.recent_answers) > 5:
+                    self.recent_answers = self.recent_answers[-5:]
+                if callback:
+                    callback(answer)
+                return answer, docs, intent
+
+            # ---------- BUSINESS MODE – STRICT RAG ONLY, WITH HISTORY CONTEXT ----------
+            try:
+                docs = self.retriever.get_relevant_documents(query)[:5]  # increased k
+                
+                if not docs:
                     answer = "I don't have specific information about that in my knowledge base. However, I can tell you more about our core services or a particular area you're interested in. What would you like to know?"
                     if callback:
                         callback(answer)
