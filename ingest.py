@@ -38,7 +38,7 @@ def ingest_documents():
 
     # 🔥 Production embedding model (BGE v1.5)
     embeddings = HuggingFaceEmbeddings(
-        model_name="BAAI/bge-base-en-v1.5",
+        model_name="all-MiniLM-L6-v2",
         model_kwargs={"device": "cpu"},  # cloud-safe
         encode_kwargs={"normalize_embeddings": True}
     )
