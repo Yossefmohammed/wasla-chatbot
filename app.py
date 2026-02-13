@@ -351,13 +351,14 @@ def load_qa_chain():
     
     class EnhancedSmartRAG:
         def __init__(self, cheap_llm):
-            self.history = []  # stores (query, answer, q_emb, timestamp)
+            self.history = []  # stores (query, answer, q_emb, timestamp, sources)  # <-- NEW: store sources too
             self.embed_model = SentenceTransformer(
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
             self.greetings_db = self._load_greetings()
             self.cheap_llm = cheap_llm
             self.main_llm = llm
+            self.retriever = retriever  # <-- NEW: store retriever for reuse
             
             # Large fallback greetings list (25+ diverse options)
             self.fallback_greetings = [
@@ -403,6 +404,7 @@ def load_qa_chain():
                 "how is it going", "how do you do", "nice to meet you"
             ]
         
+        # <-- NEW: elaboration intent phrases
         def detect_intent(self, query):
             q = query.lower().strip()
             if q in self.greetings_db:
@@ -418,6 +420,11 @@ def load_qa_chain():
             for pattern in small_talk_patterns:
                 if pattern in q:
                     return "small_talk", 0.9
+            # <-- NEW: detect elaboration requests
+            elaboration_patterns = ["tell me more", "go on", "elaborate", "expand", "more details", "can you explain further", "tell me about that"]
+            for pattern in elaboration_patterns:
+                if pattern in q:
+                    return "elaboration", 0.9
             return "business", 0.8
         
         # ---------- RAW CONTEXT PREVIEW (NO LLM) – FAST & FACTUAL ----------
@@ -439,20 +446,20 @@ def load_qa_chain():
             q_emb = self.embed_model.encode(query, convert_to_tensor=True)
             similar_count = 0
             is_repeat = False
-            for i, (prev_q, _, prev_emb, _) in enumerate(self.history[-8:]):
+            for i, (prev_q, _, prev_emb, _,_) in enumerate(self.history[-8:]):  # <-- MODIFIED: unpack 5 elements
                 similarity = util.pytorch_cos_sim(q_emb, prev_emb).item()
                 recency_boost = 1 - (i / 20)
                 threshold = 0.78 + recency_boost
                 if similarity > threshold:
                     similar_count += 1
-                    if similarity > 0.30:  # Slightly lowered to catch more
+                    if similarity > 0.30:
                         is_repeat = True
             return is_repeat, similar_count
         
         # ---------- GENERATE PROMPT WITH ANTI‑REPETITION MEMORY ----------
         def generate_prompt(self, query, context, history_context="", 
-                           repeat=False, repeat_count=0):
-            
+                           repeat=False, repeat_count=0, is_elaboration=False):  # <-- NEW: is_elaboration flag
+            # <-- MODIFIED: enhanced instructions
             base_instruction = """You are a consultant representing Wasla Solutions.
 
 STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
@@ -464,15 +471,18 @@ STRICT RULES – YOU MUST FOLLOW THEM EXACTLY:
 4. NEVER mention Wasla's location, team size, founding date, or any other fact unless it appears in the CONTEXT.
 5. Always refer to Wasla Solutions as "we", "us", or "our".
 6. Maximum 5 sentences.
-7. End with ONE focused follow-up question (only if you actually answered something).
 
-🔥 CREATIVITY & VARIETY RULES (CRITICAL FOR USER FEEDBACK):
-8. Be warm, conversational, and enthusiastic – like a senior consultant who genuinely loves their work.
-9. Vary your sentence structure and vocabulary – do NOT repeat the same phrases across different answers.
-10. Use rhetorical questions, mild emphasis, and confident language (e.g., "Great question!", "Exactly!", "Here's what I'd suggest…").
-11. Never sound like a robot – avoid bullet points, numbered lists, or overly formal phrasing unless it's a direct quote from context.
-12. 🚫 **NEVER start an answer with "You're looking for…" or similar repetitive rhetorical patterns.** Vary your openings.
-13. If you are repeating an answer (repeat=True), you MUST use completely different wording and offer a fresh angle or example – never copy the previous response."""
+🔥 CONCRETE FACTS REQUIREMENT:
+- You MUST extract **at least one specific fact, number, service name, client example, or statistic** from the CONTEXT and include it in your answer.
+- If the CONTEXT contains multiple facts, choose the most relevant one.
+- Avoid generic marketing words like: passionate, excited, empower, delighted, thrilled, simplify, navigate, ever‑evolving, landscape (unless they appear in the CONTEXT).
+
+🔥 CONVERSATIONAL STYLE:
+- Be warm, professional, and enthusiastic – like a senior consultant.
+- Vary your sentence structure and vocabulary – do NOT repeat the same phrases across different answers.
+- Never sound like a robot – avoid bullet points, numbered lists, or overly formal phrasing unless it's a direct quote from context.
+- 🚫 **NEVER start an answer with "You're looking for…" or similar repetitive rhetorical patterns.** Vary your openings.
+- End with a follow‑up question **only if** it feels natural and you have actually provided information. Otherwise, simply end with a closing statement."""
 
             if repeat_count >= 2:
                 return f"""{base_instruction}
@@ -486,7 +496,7 @@ Previous answers:
 - Acknowledge we've covered this.
 - Your response must be **completely different** in wording and structure from any previous answers.
 - Offer ONE completely new angle, insight, or example (ONLY from CONTEXT).
-- Ask a specific, more advanced follow-up question.
+- Ask a specific, more advanced follow-up question (optional).
 
 Question: {query}
 
@@ -507,6 +517,24 @@ Previous answers:
 Question: {query}
 
 New answer:"""
+            # <-- NEW: special handling for elaboration
+            if is_elaboration:
+                return f"""{base_instruction}
+
+The user is asking for more details on a topic you just discussed.
+
+🔥 ELABORATION MODE:
+- Provide **additional facts, examples, or deeper explanation** from the CONTEXT.
+- Do NOT simply rephrase your previous answer.
+- If the CONTEXT has more details, use them. If not, say "I've shared everything I know on that topic from our knowledge base. Would you like to ask about something else?"
+- You may include up to 5 sentences.
+
+CONTEXT:
+{context}
+
+User request: {query}
+
+Consultant response:"""
             return f"""{base_instruction}
 
 {history_context}
@@ -544,8 +572,7 @@ Consultant response:"""
             
             # ---------- GREETING MODE – ALWAYS USE LLM WITH ANTI‑REPETITION ----------
             if intent == "greeting" and confidence > 0.7 and len(words) <= 5:
-                # Gather recent assistant answers from history (last 3)
-                recent_answers = [a for (_, a, _, _) in self.history[-3:]]
+                recent_answers = [a for (_, a, _, _, _) in self.history[-3:]]  # <-- MODIFIED: unpack 5
                 recent_context = "\n".join([f"- {a}" for a in recent_answers]) if recent_answers else "None yet."
                 
                 prompt = f"""You are the digital front desk of Wasla Solutions.
@@ -565,11 +592,9 @@ Your new greeting:"""
                 
                 try:
                     answer = self.safe_llm_invoke(prompt, model="cheap")
-                    # Optional: if answer is too long, truncate gently
                     if len(answer.split()) > 10:
-                        answer = answer[:60]  # simple truncation
+                        answer = answer[:60]
                 except Exception as e:
-                    # Fallback: choose a greeting not recently used
                     available = [g for g in self.fallback_greetings if g not in recent_answers]
                     if not available:
                         available = self.fallback_greetings
@@ -578,8 +603,8 @@ Your new greeting:"""
                 if callback:
                     callback(answer)
                 
-                # Store in history for future anti‑repetition
-                self.history.append((query, answer, q_emb, timestamp))
+                # Store in history (sources = [])
+                self.history.append((query, answer, q_emb, timestamp, []))  # <-- MODIFIED: added sources
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
@@ -589,7 +614,6 @@ Your new greeting:"""
             if intent == "small_talk" and confidence > 0.7:
                 q_lower = query.lower()
                 
-                # Branded answer for "who are you / what can you do" – let LLM generate varied responses
                 if any(phrase in q_lower for phrase in ["who are you", "what are you", "what can you do", "your name"]):
                     prompt = f"""You are a consultant from Wasla Solutions.
 The user asked: "{query}"
@@ -607,7 +631,6 @@ Your answer:"""
                     except:
                         answer = "We're Wasla Solutions – a digital strategy consultancy specialising in AI and transformation. How can we help you today?"
                 else:
-                    # Generic small talk – LLM generates neutral response
                     prompt = f"""You are a helpful assistant.
 The user said: "{query}"
 
@@ -626,22 +649,59 @@ Your response:"""
                 if callback:
                     callback(answer)
                 
-                # Store in history
-                self.history.append((query, answer, q_emb, timestamp))
+                self.history.append((query, answer, q_emb, timestamp, []))  # <-- MODIFIED: added sources
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
                 return answer, [], intent
 
+            # ---------- ELABORATION MODE – USE SOURCES FROM LAST ANSWER ----------
+            if intent == "elaboration" and self.history:
+                # Get the last assistant response and its sources
+                last_query, last_answer, last_emb, last_ts, last_sources = self.history[-1]  # <-- NEW
+                if last_sources:
+                    # Retrieve additional chunks from the same documents
+                    # For simplicity, we'll re‑run a broader retrieval using the last query as seed
+                    # or we could store more chunks. Here we just retrieve fresh using the current query.
+                    docs = self.retriever.get_relevant_documents(last_query)[:3]  # use last query to stay on topic
+                    # Or use current query? We'll use last_query to keep context.
+                else:
+                    # No sources from last answer, fallback to normal retrieval
+                    docs = self.retriever.get_relevant_documents(query)[:3]
+                
+                if not docs:
+                    answer = "I don't have additional information on that topic."
+                    if callback:
+                        callback(answer)
+                    self.history.append((query, answer, q_emb, timestamp, []))
+                    return answer, [], intent
+                
+                context = self.summarize_chunks(docs)
+                prompt = self.generate_prompt(query, context, is_elaboration=True)
+                
+                try:
+                    answer = self.safe_llm_invoke(prompt)
+                except Exception as e:
+                    print(f"❌ Elaboration LLM failed: {e}")
+                    answer = "I'm sorry, I couldn't retrieve more details right now."
+                
+                if answer and "I don't have information" not in answer:
+                    answer = self.add_inline_citations(answer, docs)
+                
+                self.history.append((query, answer, q_emb, timestamp, docs))
+                if callback:
+                    callback(answer)
+                return answer, docs, intent
+
             # ---------- BUSINESS MODE – STRICT RAG ONLY, WITH HISTORY CONTEXT ----------
             try:
-                docs = retriever.get_relevant_documents(query)[:3]
+                docs = self.retriever.get_relevant_documents(query)[:3]  # <-- MODIFIED: use self.retriever
                 
                 if not docs:
                     answer = "I don't have information about that in my knowledge base."
                     if callback:
                         callback(answer)
-                    self.history.append((query, answer, q_emb, timestamp))
+                    self.history.append((query, answer, q_emb, timestamp, []))
                     if len(self.history) > 30:
                         self.history = self.history[-30:]
                     return answer, [], intent
@@ -649,17 +709,18 @@ Your response:"""
                 context = self.summarize_chunks(docs)
                 is_repeat, repeat_count = self.check_repetition(query)
                 
-                # Build history context from last 3 exchanges (full answers, not truncated)
+                # Build history context from last 3 exchanges
                 history_context = ""
                 if self.history:
                     recent = self.history[-3:]
                     history_context = "Previous conversation:\n"
-                    for q, a, _, _ in recent:
+                    for q, a, _, _, _ in recent:
                         history_context += f"Q: {q}\nA: {a}\n\n"
                 
                 prompt = self.generate_prompt(
                     query, context, history_context, 
-                    repeat=is_repeat, repeat_count=repeat_count
+                    repeat=is_repeat, repeat_count=repeat_count,
+                    is_elaboration=False
                 )
                 
                 answer = None
@@ -676,7 +737,7 @@ Your response:"""
                 if answer and "I don't have information" not in answer:
                     answer = self.add_inline_citations(answer, docs)
                 
-                self.history.append((query, answer, q_emb, timestamp))
+                self.history.append((query, answer, q_emb, timestamp, docs))  # <-- MODIFIED: store sources
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 
@@ -688,14 +749,13 @@ Your response:"""
                 print("❌ BUSINESS MODE UNRECOVERABLE ERROR:")
                 traceback.print_exc()
                 error_msg = "I encountered an unexpected issue. Please try again or contact support."
-                self.history.append((query, error_msg, q_emb, timestamp))
+                self.history.append((query, error_msg, q_emb, timestamp, []))
                 if len(self.history) > 30:
                     self.history = self.history[-30:]
                 return error_msg, [], intent
         
         def _get_recent_answers(self, n=3):
-            """Helper to get last n assistant answers for anti‑repetition prompts."""
-            recent = [a for (_, a, _, _) in self.history[-n:]]
+            recent = [a for (_, a, _, _, _) in self.history[-n:]]  # <-- MODIFIED: unpack 5
             return "\n".join([f"- {a}" for a in recent]) if recent else "None yet."
     
     return EnhancedSmartRAG(cheap_llm)
