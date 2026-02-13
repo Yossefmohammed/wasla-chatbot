@@ -1,9 +1,21 @@
 import streamlit as st
-import os, csv, gc, hashlib, json, time, traceback, requests
+import os, hashlib, json, time, gc, shutil
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
-from typing import List, Dict
-from functools import wraps
+from typing import List
+import torch
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.chains import RetrievalQA
+from langchain.llms import HuggingFacePipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from langchain_community.document_loaders import (
+    PyPDFLoader, TextLoader, CSVLoader,
+    UnstructuredWordDocumentLoader, UnstructuredPowerPointLoader
+)
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from tqdm import tqdm
 
 # ===============================
 # ENV & INIT
@@ -15,6 +27,9 @@ gc.collect()
 # ===============================
 # CONSTANTS / SETTINGS
 # ===============================
+CHROMA_DIR = Path("./chroma_db")
+DOCS_DIR = Path("./docs")
+
 if not os.path.exists("constant.py"):
     with open("constant.py", "w") as f:
         f.write('''from dataclasses import dataclass
@@ -51,86 +66,130 @@ def set_dark_theme():
 set_dark_theme()
 
 # ===============================
-# QA CHAIN
+# DOCUMENT LOADING / INGESTION
 # ===============================
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
-from langchain.llms import HuggingFacePipeline
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-import torch
+LOADERS = {
+    '.pdf': PyPDFLoader,
+    '.txt': TextLoader,
+    '.csv': CSVLoader,
+    '.docx': UnstructuredWordDocumentLoader,
+    '.doc': UnstructuredWordDocumentLoader,
+    '.pptx': UnstructuredPowerPointLoader,
+    '.ppt': UnstructuredPowerPointLoader,
+}
 
-def load_qa_chain() -> RetrievalQA:
-    """Load QA chain safely (CPU/GPU compatible)"""
-    try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        # Embeddings
-        embeddings = HuggingFaceEmbeddings(
-            model_name="BAAI/bge-base-en-v1.5",
-            model_kwargs={"device": device},
-            encode_kwargs={"normalize_embeddings": True}
-        )
-
-        # Chroma vectorstore
-        if not os.path.exists(CHROMA_SETTINGS.persist_directory):
-            st.warning("⚠️ Chroma DB not found. Add documents and build the DB first.")
-            return None
-
-        vectordb = Chroma(
-            persist_directory=CHROMA_SETTINGS.persist_directory,
-            embedding_function=embeddings
-        )
-        retriever = vectordb.as_retriever(search_kwargs={"k": 3})
-
-        # HF LLM pipeline
-        tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-560m")
-        model = AutoModelForCausalLM.from_pretrained(
-            "bigscience/bloom-560m",
-            device_map=None if device=="cpu" else "auto"
-        )
-        hf_pipe = pipeline(
-            task="text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            device=0 if device=="cuda" else -1,
-            max_new_tokens=512,
-            temperature=0.7
-        )
-        llm = HuggingFacePipeline(pipeline=hf_pipe)
-
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            retriever=retriever,
-            return_source_documents=True
-        )
-        return qa_chain
-    except Exception as e:
-        st.error(f"❌ Failed to load QA chain: {e}")
-        st.text(traceback.format_exc())
+def build_chroma_db(chunk_size: int = 1200, chunk_overlap: int = 250):
+    if not DOCS_DIR.exists() or not any(DOCS_DIR.iterdir()):
+        st.warning("❌ No documents found in `docs/`. Upload files first.")
         return None
 
+    # Clear old DB
+    if CHROMA_DIR.exists():
+        shutil.rmtree(CHROMA_DIR)
+
+    all_docs = []
+    for ext, loader_cls in LOADERS.items():
+        for file_path in DOCS_DIR.rglob(f"*{ext}"):
+            try:
+                loader = loader_cls(str(file_path))
+                docs = loader.load()
+                all_docs.extend(docs)
+            except Exception as e:
+                st.error(f"Failed to load {file_path.name}: {e}")
+
+    if not all_docs:
+        st.warning("❌ No valid documents loaded.")
+        return None
+
+    # Split into chunks
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ".", "!", "?", ",", " "]
+    )
+    texts = splitter.split_documents(all_docs)
+    st.success(f"🔹 Total chunks created: {len(texts)}")
+
+    # Embeddings
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5",
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True}
+    )
+    st.info(f"⚡ Using embeddings model on {device}")
+
+    # Build vectorstore
+    vectordb = Chroma.from_documents(
+        documents=texts,
+        embedding=embeddings,
+        persist_directory=str(CHROMA_DIR)
+    )
+    vectordb.persist()
+    st.success("✅ Chroma DB built successfully!")
+    return vectordb
+
 # ===============================
-# SESSION STATE INIT
+# QA CHAIN
+# ===============================
+def load_qa_chain() -> RetrievalQA:
+    if not CHROMA_DIR.exists():
+        st.warning("⚠️ Chroma DB not found. Build the DB first.")
+        return None
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    embeddings = HuggingFaceEmbeddings(
+        model_name="BAAI/bge-base-en-v1.5",
+        model_kwargs={"device": device},
+        encode_kwargs={"normalize_embeddings": True}
+    )
+    vectordb = Chroma(
+        persist_directory=CHROMA_SETTINGS.persist_directory,
+        embedding_function=embeddings
+    )
+    retriever = vectordb.as_retriever(search_kwargs={"k": 3})
+
+    tokenizer = AutoTokenizer.from_pretrained("bigscience/bloom-560m")
+    model = AutoModelForCausalLM.from_pretrained("bigscience/bloom-560m")
+    hf_pipe = pipeline(
+        task="text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        device=0 if device=="cuda" else -1,
+        max_new_tokens=512,
+        temperature=0.7
+    )
+    llm = HuggingFacePipeline(pipeline=hf_pipe)
+
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=retriever,
+        return_source_documents=True
+    )
+    return qa_chain
+
+# ===============================
+# SESSION STATE
 # ===============================
 def init_session_state():
     defaults = {
-        "messages": [], "qa_chain": None, "feedback_given": set(),
-        "uploaded_files": [], "current_question": "", "current_answer": "",
-        "current_sources": [], "session_id": hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()
+        "messages": [], "qa_chain": None, "uploaded_files": [],
+        "current_question": "", "current_answer": "", "current_sources": [],
+        "session_id": hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
-    if st.session_state.qa_chain is None:
+
+    if st.session_state.qa_chain is None and CHROMA_DIR.exists():
         with st.spinner("🚀 Initializing AI consultant..."):
             st.session_state.qa_chain = load_qa_chain()
 
 # ===============================
-# SAVE CONVERSATION (Optional)
+# SAVE CONVERSATION
 # ===============================
 def save_conversation(question, answer, intent):
-    # Optional: log conversation to JSON or DB
+    # Optional: log conversation to JSON/DB
     pass
 
 # ===============================
@@ -138,64 +197,75 @@ def save_conversation(question, answer, intent):
 # ===============================
 def render_sidebar():
     st.sidebar.title("Wasla AI Consultant")
-    st.sidebar.markdown("Ask questions about Wasla's services, strategy, or business.")
-    st.sidebar.button("Clear Chat", on_click=lambda: st.session_state.messages.clear())
+    st.sidebar.markdown("Upload documents and ask questions about Wasla's services, strategy, or business.")
+    uploaded_files = st.sidebar.file_uploader("Upload Docs", type=['pdf','txt','csv','docx','doc','pptx','ppt'], accept_multiple_files=True)
+    if uploaded_files:
+        for file in uploaded_files:
+            file_path = DOCS_DIR / file.name
+            DOCS_DIR.mkdir(exist_ok=True)
+            with open(file_path, "wb") as f:
+                f.write(file.getbuffer())
+        st.sidebar.success(f"✅ Uploaded {len(uploaded_files)} file(s)")
+
+    if st.sidebar.button("Build Chroma DB"):
+        with st.spinner("⚡ Building Chroma DB..."):
+            db = build_chroma_db()
+            if db:
+                st.session_state.qa_chain = load_qa_chain()
+
+    if st.sidebar.button("Clear Chat"):
+        st.session_state.messages.clear()
 
 # ===============================
-# RUN APP
+# MAIN APP
 # ===============================
 def main():
-    try:
-        init_session_state()
-        render_sidebar()
-        st.markdown("<h1 style='text-align:center; margin-bottom:2rem;'>🤖 Wasla AI Strategy Consultant</h1>", unsafe_allow_html=True)
+    init_session_state()
+    render_sidebar()
+    st.markdown("<h1 style='text-align:center; margin-bottom:2rem;'>🤖 Wasla AI Strategy Consultant</h1>", unsafe_allow_html=True)
 
-        # Display chat history
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                if message["role"]=="assistant" and message.get("sources"):
-                    with st.expander("📚 View Sources", expanded=False):
-                        for i, s in enumerate(message["sources"][:3]):
-                            name = os.path.basename(s.metadata.get("source", f"doc_{i+1}"))
-                            st.markdown(f"**{i+1}. {name}**")
-                            st.caption(s.page_content[:200]+"...")
+    if st.session_state.qa_chain is None:
+        st.warning("⚠️ Chroma DB not initialized. Upload documents and click 'Build Chroma DB'.")
+        return
 
-        # Chat input
-        user_input = st.chat_input("Ask about Wasla's services, strategy, or business...")
-        if user_input:
-            st.session_state.messages.append({"role":"user", "content":user_input})
-            with st.chat_message("user"):
-                st.markdown(user_input)
-            with st.chat_message("assistant"):
-                placeholder = st.empty()
-                try:
-                    if st.session_state.qa_chain is None:
-                        placeholder.markdown("⚠️ QA chain not initialized.")
-                    else:
-                        result = st.session_state.qa_chain({"query": user_input})
-                        answer = result.get("result") or result.get("answer") or "No answer generated."
-                        sources = result.get("source_documents", [])
-                        placeholder.markdown(answer)
-                        st.session_state.messages.append({
-                            "role":"assistant",
-                            "content": answer,
-                            "sources": sources,
-                            "id": hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
-                        })
-                        st.session_state.current_question = user_input
-                        st.session_state.current_answer = answer
-                        st.session_state.current_sources = sources
-                        save_conversation(user_input, answer, None)
-                except Exception as e:
-                    st.error(f"❌ Error generating answer: {e}")
-                    st.text(traceback.format_exc())
+    # Chat history
+    for idx, message in enumerate(st.session_state.messages):
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if message["role"]=="assistant" and message.get("sources"):
+                with st.expander("📚 View Sources", expanded=False):
+                    for i, s in enumerate(message["sources"][:3]):
+                        name = os.path.basename(s.metadata.get("source", f"doc_{i+1}"))
+                        st.markdown(f"**{i+1}. {name}**")
+                        st.caption(s.page_content[:200]+"...")
 
-        st.markdown("<p style='text-align:center;color:#6B7280;font-size:0.8rem;'>Powered by Wasla Solutions • AI Strategy Consultant • Responses are AI-generated</p>", unsafe_allow_html=True)
-    
-    except Exception as e:
-        st.error(f"❌ App failed to start: {e}")
-        st.text(traceback.format_exc())
+    # Chat input
+    user_input = st.chat_input("Ask about Wasla's services, strategy, or business...")
+    if user_input:
+        st.session_state.messages.append({"role":"user", "content":user_input})
+        with st.chat_message("user"):
+            st.markdown(user_input)
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            try:
+                result = st.session_state.qa_chain({"query": user_input})
+                answer = result.get("result") or result.get("answer") or "No answer generated."
+                sources = result.get("source_documents", [])
+                placeholder.markdown(answer)
+                st.session_state.messages.append({
+                    "role":"assistant",
+                    "content": answer,
+                    "sources": sources,
+                    "id": hashlib.md5(f"{user_input}{time.time()}".encode()).hexdigest()
+                })
+                st.session_state.current_question = user_input
+                st.session_state.current_answer = answer
+                st.session_state.current_sources = sources
+                save_conversation(user_input, answer, None)
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+
+    st.markdown("<p style='text-align:center;color:#6B7280;font-size:0.8rem;'>Powered by Wasla Solutions • AI Strategy Consultant • Responses are AI-generated</p>", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
